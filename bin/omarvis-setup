@@ -1,0 +1,126 @@
+#!/bin/bash
+
+set -euo pipefail
+
+PLUGIN_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+CONFIG_DIR="$HOME/.config/omarchy/omarvis"
+CONFIG_PATH="$CONFIG_DIR/config.json"
+KEY_PATH="$CONFIG_DIR/api_key"
+VENV_DIR="$HOME/.local/share/omarvis/venv"
+BINDINGS_PATH="$HOME/.config/hypr/bindings.lua"
+BINDING='o.bind("SUPER + CTRL + J", "Omarvis", "omarchy-shell omarvis toggle")'
+
+need_command() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "Missing required command: $1" >&2
+    exit 1
+  }
+}
+
+need_command omarchy
+need_command python
+need_command jq
+
+echo "Installing audio dependencies..."
+omarchy pkg add portaudio python-pyaudio
+
+if ! command -v agent-browser >/dev/null 2>&1; then
+  if command -v npm >/dev/null 2>&1; then
+    echo "Installing agent-browser 0.34..."
+    npm install -g agent-browser@0.34
+  else
+    echo "npm is unavailable. Browser control will remain disabled." >&2
+  fi
+fi
+
+AGENT_BROWSER_PATH=$(command -v agent-browser || true)
+BROWSER_MODE="unavailable"
+BROWSER_EXECUTABLE=""
+
+for browser in chromium google-chrome google-chrome-stable chrome; do
+  if command -v "$browser" >/dev/null 2>&1; then
+    BROWSER_EXECUTABLE=$(command -v "$browser")
+    break
+  fi
+done
+
+if [[ -n $AGENT_BROWSER_PATH ]]; then
+  chromium_major=0
+  if [[ -n $BROWSER_EXECUTABLE ]]; then
+    chromium_major=$($BROWSER_EXECUTABLE --version 2>/dev/null | grep -Eo '[0-9]+' | head -1 || true)
+    chromium_major=${chromium_major:-0}
+  fi
+  if (( chromium_major >= 146 )); then
+    BROWSER_MODE="own-browser"
+  else
+    BROWSER_MODE="omarvis-browser"
+    if [[ -z $BROWSER_EXECUTABLE ]]; then
+      echo "No Chromium executable found. Installing agent-browser's managed browser..."
+      agent-browser install
+    fi
+  fi
+fi
+
+echo
+echo "For access to your running Chromium, open chrome://inspect/#remote-debugging and enable remote debugging."
+echo "Chromium will show an Allow prompt on Omarvis's first browser request, followed by an automation banner."
+
+echo "Creating the Omarvis Python environment..."
+python -m venv --system-site-packages "$VENV_DIR"
+"$VENV_DIR/bin/pip" install "elevenlabs>=2,<3"
+
+install -d -m 700 "$CONFIG_DIR"
+if [[ ! -s $KEY_PATH && -z ${ELEVENLABS_API_KEY:-} ]]; then
+  read -r -s -p "ElevenLabs API key: " api_key
+  echo
+  install -m 600 /dev/null "$KEY_PATH"
+  printf '%s\n' "$api_key" >"$KEY_PATH"
+  unset api_key
+fi
+
+existing='{}'
+if [[ -f $CONFIG_PATH ]]; then
+  existing=$(cat "$CONFIG_PATH")
+fi
+updated=$(jq \
+  --arg browser_mode "$BROWSER_MODE" \
+  --arg agent_browser_path "$AGENT_BROWSER_PATH" \
+  --arg browser_executable_path "$BROWSER_EXECUTABLE" \
+  '. + {
+    agent_id: (.agent_id // ""),
+    llm: (.llm // "gemini-2.5-flash"),
+    input_device_index: (.input_device_index // null),
+    herdr_announcements: (.herdr_announcements // true),
+    browser_mode: $browser_mode,
+    agent_browser_path: $agent_browser_path,
+    browser_executable_path: $browser_executable_path
+  }' <<<"$existing")
+install -m 600 /dev/null "$CONFIG_PATH"
+printf '%s\n' "$updated" >"$CONFIG_PATH"
+
+cd "$PLUGIN_DIR"
+"$VENV_DIR/bin/python" -m omarvis.provision
+
+echo
+echo "Hotkey binding:"
+echo "$BINDING"
+if [[ -f $BINDINGS_PATH ]] && ! grep -Fq 'omarchy-shell omarvis toggle' "$BINDINGS_PATH"; then
+  read -r -p "Append this binding to $BINDINGS_PATH? [y/N] " answer
+  if [[ $answer == [yY] || $answer == [yY][eE][sS] ]]; then
+    backup="$BINDINGS_PATH.$(date +%Y%m%d-%H%M%S).bak"
+    cp "$BINDINGS_PATH" "$backup"
+    printf '\n%s\n' "$BINDING" >>"$BINDINGS_PATH"
+    echo "Updated bindings. Backup: $backup"
+  fi
+fi
+
+omarchy-shell shell rescanPlugins
+omarchy plugin enable omarvis.voice
+
+echo
+echo "Plugin self-check:"
+omarchy-shell shell listPlugins | jq '.[] | select(.id == "omarvis.voice")'
+omarchy-shell omarvis status
+
+echo
+echo "Omarvis setup complete. Press SUPER + CTRL + J or click the microphone in the bar."

@@ -1,0 +1,32 @@
+# Captured from `herdr completion zsh` on herdr 0.8.2.
+# Nested `herdr <group> <command> --help` falls back to top-level help in this release.
+
+215:'--no-focus[]' \
+280:'--no-focus[]' \
+291:'--no-focus[]' \
+328:'--no-focus[]' \
+413:'*::key:_default' \
+418:'*--until[State to match after --wait; repeat for more than one state]:STATUS:(idle working blocked done unknown)' \
+420:'--wait[Wait for the first matching state observed after submission]' \
+439:'*--until[State to match; repeat for more than one state]:STATUS:(idle working blocked done unknown)' \
+494:'--current[]' \
+505:'--current[]' \
+511:'--current[]' \
+516:'--direction[]:DIRECTION:(left right up down)' \
+518:'--current[]' \
+524:'--current[]' \
+529:'--direction[]:DIRECTION:(left right up down)' \
+531:'--current[]' \
+536:'--direction[]:DIRECTION:(left right up down)' \
+539:'--current[]' \
+545:'--current[]' \
+573:'--current[]' \
+580:'--direction[]:DIRECTION:(right down)' \
+585:'--current[]' \
+587:'--no-focus[]' \
+593:'--direction[]:DIRECTION:(left right up down)' \
+597:'--current[]' \
+612:'--no-focus[]' \
+630:'*::key:_default' \
+998:'--direction[]:DIRECTION:(right down)' \
+1002:'--no-focus[]' \

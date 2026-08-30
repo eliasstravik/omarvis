@@ -1,0 +1,19 @@
+Manage tabs over the socket API
+
+Usage: herdr tab [COMMAND]
+
+Commands:
+  list    List tabs
+  create  Create a tab
+  get     Show a tab
+  focus   Focus a tab
+  rename  Rename a tab
+  close   Close a tab
+
+Are you an AI? Use these resources ONLY IF your task specifically asks you to:
+  Help a human understand or set up Herdr for the first time:
+    https://herdr.dev/agent-guide.md
+  Debug or investigate a problem with Herdr:
+    https://herdr.dev/llms.txt
+  Control Herdr panes, agents, or workspaces:
+    SKIP if a Herdr skill is already in your context. Otherwise run: herdr --skill

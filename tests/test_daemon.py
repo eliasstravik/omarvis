@@ -1,0 +1,204 @@
+import json
+from pathlib import Path
+
+from omarvis.catalog import catalog_from_data
+from omarvis.daemon import ExecutionResult, RunToolHandler, compact_browser_tabs
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def omarchy_catalog():
+    return catalog_from_data(
+        json.loads((FIXTURES / "omarchy-commands.json").read_text())
+    )
+
+
+def test_run_tool_enforces_a_user_turn_before_confirmation():
+    executed = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        executed.append(tuple(argv))
+        return ExecutionResult(0, "done\n", "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers={"workspace", "exit"},
+        config={},
+        executor=executor,
+        clock=lambda: 100.0,
+        confirmation_wait=0,
+    )
+
+    assert (
+        handler.handle({"command": "omarchy system shutdown", "confirmed": True})[
+            "status"
+        ]
+        == "needs_confirmation"
+    )
+    assert (
+        handler.handle({"command": "omarchy system shutdown"})["status"]
+        == "needs_confirmation"
+    )
+    assert executed == []
+
+    handler.note_user_transcript("yes")
+    result = handler.handle({"command": "omarchy system shutdown", "confirmed": True})
+
+    assert result == {"status": "ok", "exit_code": 0, "stdout": "done\n", "stderr": ""}
+    assert executed == [("omarchy", "system", "shutdown")]
+
+
+def test_browser_tab_ownership_rewrites_only_navigation_until_omarvis_owns_the_tab():
+    executed = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        executed.append((tuple(argv), timeout, kill_on_timeout, stdout_limit))
+        return ExecutionResult(0, "[]", "")
+
+    config = {
+        "agent_browser_path": "/opt/agent-browser",
+        "browser_mode": "own-browser",
+    }
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config=config,
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+    assert (
+        handler.handle({"command": "agent-browser open https://github.com"})["status"]
+        == "ok"
+    )
+    assert (
+        handler.handle({"command": "agent-browser open https://example.com"})["status"]
+        == "ok"
+    )
+
+    browser_actions = [
+        call
+        for call in executed
+        if "--json" not in call[0] and call[0][-2:] != ("tab", "list")
+    ]
+    assert browser_actions[0][0][-3:] == ("tab", "new", "https://github.com")
+    assert browser_actions[1][0][-2:] == ("open", "https://example.com")
+    assert browser_actions[0][1:] == (30.0, True, 3000)
+
+    click_calls = []
+
+    def click_executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        click_calls.append(tuple(argv))
+        return ExecutionResult(0, "[]", "")
+
+    fresh_handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config=config,
+        executor=click_executor,
+        confirmation_wait=0,
+    )
+    assert (
+        fresh_handler.handle({"command": "agent-browser click @e1"})["status"] == "ok"
+    )
+    assert any(call[-2:] == ("click", "@e1") for call in click_calls)
+
+
+def test_browser_probe_timeout_waits_for_chromium_approval_without_fallback():
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append(tuple(argv))
+        return ExecutionResult(None, "", "", timed_out=True)
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={
+            "agent_browser_path": "/opt/agent-browser",
+            "browser_mode": "own-browser",
+        },
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+    assert handler.handle({"command": "agent-browser tab list"}) == {
+        "status": "failed",
+        "reason": "browser-pending-approval",
+    }
+    assert calls == [
+        ("/opt/agent-browser", "--session", "omarvis", "--auto-connect", "tab", "list")
+    ]
+
+
+def test_browser_tab_context_is_compact_and_omits_target_ids():
+    payload = json.dumps(
+        {
+            "success": True,
+            "data": {
+                "tabs": [
+                    {
+                        "id": "t1",
+                        "title": "Pull request #1 · eliasstravik/omarvis",
+                        "url": "https://github.com/eliasstravik/omarvis/pull/1",
+                        "targetId": "4A0B7C4E1F2D3A4B5C6D7E8F90A1B2C3",
+                    }
+                ]
+            },
+        }
+    )
+
+    assert compact_browser_tabs(payload) == (
+        "Browser tabs: t1 Pull request #1 · eliasstravik/omarvis github.com"
+    )
+
+
+def test_browser_snapshot_budget_and_screenshot_path_are_daemon_owned(tmp_path):
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append((tuple(argv), stdout_limit))
+        return ExecutionResult(0, "snapshot", "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={
+            "agent_browser_path": "/opt/agent-browser",
+            "browser_mode": "omarvis-browser",
+            "cache_dir": str(tmp_path),
+        },
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+    assert handler.handle({"command": "agent-browser snapshot"})["status"] == "ok"
+    assert handler.handle({"command": "agent-browser screenshot"})["status"] == "ok"
+
+    assert calls[0][1] == 6000
+    assert calls[1][0][-2] == "screenshot"
+    assert Path(calls[1][0][-1]).parent == tmp_path
+
+
+def test_herdr_json_results_are_compacted_before_returning_to_the_agent():
+    payload = (FIXTURES / "herdr-agent-list.json").read_text()
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        return ExecutionResult(0, payload, "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+    result = handler.handle({"command": "herdr agent list"})
+
+    assert result["status"] == "ok"
+    assert result["stdout"] == (
+        "w58:p5 codex idle name=reviewer cwd=~/dev/gtm-skills\n"
+        "w58:p6 claude blocked cwd=~/dev/omarvis"
+    )
+    assert len(result["stdout"]) <= 600

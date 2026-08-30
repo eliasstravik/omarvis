@@ -1,0 +1,20 @@
+{
+  "id": "cli:agent:list",
+  "result": {
+    "agents": [
+      {
+        "agent": "codex",
+        "agent_status": "idle",
+        "cwd": "/Users/eliasstravik/dev/gtm-skills",
+        "name": "reviewer",
+        "pane_id": "w58:p5"
+      },
+      {
+        "agent": "claude",
+        "agent_status": "blocked",
+        "cwd": "/Users/eliasstravik/dev/omarvis",
+        "pane_id": "w58:p6"
+      }
+    ]
+  }
+}
