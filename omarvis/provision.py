@@ -81,7 +81,7 @@ def save_config(config: dict[str, Any], path: Path = CONFIG_PATH) -> None:
 def manual_steps() -> str:
     return """Create an ElevenLabs Agent in the dashboard with these settings:
 - System prompt: paste agent/prompt.md.
-- LLM: Gemini 2.5 Flash (`gemini-2.5-flash`).
+- LLM: GPT-5.6 Sol (`gpt-5.6-sol`).
 - First message: empty. Language: English.
 - Turn timeout: 20 seconds. Silence end-call timeout: 30 seconds. Maximum duration: 300 seconds.
 - Enable the `end_call` system tool.

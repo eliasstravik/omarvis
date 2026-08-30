@@ -369,7 +369,7 @@ class RunToolHandler:
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "agent_id": "",
-    "llm": "gemini-2.5-flash",
+    "llm": "gpt-5.6-sol",
     "input_device_index": None,
     "herdr_announcements": True,
     "browser_mode": "unavailable",
