@@ -1,0 +1,20 @@
+Manage workspaces over the socket API
+
+Usage: herdr workspace [COMMAND]
+
+Commands:
+  list             List workspaces
+  create           Create a workspace
+  get              Show a workspace
+  focus            Focus a workspace
+  rename           Rename a workspace
+  report-metadata  Report display-only workspace metadata
+  close            Close a workspace
+
+Are you an AI? Use these resources ONLY IF your task specifically asks you to:
+  Help a human understand or set up Herdr for the first time:
+    https://herdr.dev/agent-guide.md
+  Debug or investigate a problem with Herdr:
+    https://herdr.dev/llms.txt
+  Control Herdr panes, agents, or workspaces:
+    SKIP if a Herdr skill is already in your context. Otherwise run: herdr --skill

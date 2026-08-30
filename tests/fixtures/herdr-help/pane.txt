@@ -1,0 +1,38 @@
+Control terminal panes
+
+Usage: herdr pane [COMMAND]
+
+Commands:
+  list                  List panes
+  current               Show the current pane
+  get                   Show a pane
+  layout                Show pane layout information
+  process-info          Show pane process information
+  neighbor              Find a pane neighbor
+  edges                 Show pane edge information
+  focus                 Focus a neighboring pane
+  resize                Resize a pane split
+  zoom                  Toggle or set pane zoom
+  read                  Read pane terminal output
+  rename                Rename a pane
+  input                 Set pane input routing
+  split                 Split a pane
+  swap                  Swap panes
+  move                  Move a pane
+  close                 Close a pane
+  send-text             Send literal text to a pane
+  send-keys             Send key presses to a pane
+  wait-output           Wait for matching pane output
+  run                   Run a command in a pane
+  report-agent          Report pane agent lifecycle state
+  report-agent-session  Report pane agent session identity
+  release-agent         Release pane agent lifecycle authority
+  report-metadata       Report display-only pane metadata
+
+Are you an AI? Use these resources ONLY IF your task specifically asks you to:
+  Help a human understand or set up Herdr for the first time:
+    https://herdr.dev/agent-guide.md
+  Debug or investigate a problem with Herdr:
+    https://herdr.dev/llms.txt
+  Control Herdr panes, agents, or workspaces:
+    SKIP if a Herdr skill is already in your context. Otherwise run: herdr --skill

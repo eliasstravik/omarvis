@@ -1,0 +1,369 @@
+from __future__ import annotations
+
+import re
+import shlex
+import time
+from dataclasses import dataclass
+
+from .catalog import Catalog
+
+HERDR_IMMEDIATE = frozenset(
+    {
+        *(
+            ("agent", command)
+            for command in (
+                "list",
+                "get",
+                "read",
+                "focus",
+                "explain",
+                "prompt",
+                "start",
+                "rename",
+                "send-keys",
+            )
+        ),
+        *(
+            ("pane", command)
+            for command in (
+                "list",
+                "current",
+                "get",
+                "layout",
+                "process-info",
+                "neighbor",
+                "edges",
+                "focus",
+                "read",
+                "split",
+                "swap",
+                "move",
+                "resize",
+                "zoom",
+                "rename",
+                "input",
+                "send-keys",
+            )
+        ),
+        *(("tab", command) for command in ("list", "get", "focus", "create", "rename")),
+        *(
+            ("workspace", command)
+            for command in ("list", "get", "focus", "create", "rename")
+        ),
+        ("session", "list"),
+        ("notification", "show"),
+        ("api", "snapshot"),
+        ("status",),
+    }
+)
+HERDR_CONFIRM = frozenset(
+    {
+        ("pane", "run"),
+        ("pane", "send-text"),
+        ("pane", "close"),
+        ("tab", "close"),
+        ("workspace", "close"),
+        ("session", "stop"),
+        ("session", "delete"),
+        ("server", "stop"),
+        ("server", "reload-config"),
+        *(("worktree", command) for command in ("list", "create", "open", "remove")),
+    }
+)
+HERDR_ALLOW = HERDR_IMMEDIATE | HERDR_CONFIRM
+
+BROWSER_SINGLE_ALLOW = frozenset(
+    {
+        "open",
+        "back",
+        "forward",
+        "reload",
+        "scroll",
+        "click",
+        "dblclick",
+        "hover",
+        "focus",
+        "fill",
+        "type",
+        "press",
+        "select",
+        "check",
+        "uncheck",
+        "find",
+        "snapshot",
+        "wait",
+        "screenshot",
+        "scrollintoview",
+        "close",
+        "download",
+        "upload",
+        "drag",
+    }
+)
+BROWSER_GET_ALLOW = frozenset(
+    {"text", "html", "value", "attr", "title", "url", "count", "box", "styles"}
+)
+BROWSER_IS_ALLOW = frozenset({"visible", "enabled", "checked"})
+BROWSER_CONFIRM = frozenset({("close",), ("download",), ("upload",), ("drag",)})
+
+
+@dataclass(frozen=True)
+class Decision:
+    kind: str
+    argv: tuple[str, ...] = ()
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class PendingConfirmation:
+    argv: tuple[str, ...]
+    ts: float
+    user_turns_since: int = 0
+
+
+def _omarchy_requires_confirmation(
+    argv: tuple[str, ...], route: tuple[str, ...]
+) -> bool:
+    if route in {
+        ("omarchy", "system", "shutdown"),
+        ("omarchy", "system", "reboot"),
+        ("omarchy", "system", "logout"),
+        ("omarchy", "system", "suspend"),
+        ("omarchy", "system", "hibernate"),
+        ("omarchy", "hyprland", "window", "close", "all"),
+        ("omarchy", "plugin", "add"),
+        ("omarchy", "plugin", "clone"),
+        ("omarchy", "plugin", "remove"),
+        ("omarchy", "plugin", "update"),
+        ("omarchy", "plugin", "enable"),
+        ("omarchy", "pkg", "add"),
+        ("omarchy", "pkg", "aur", "add"),
+        ("omarchy", "pkg", "remove"),
+        ("omarchy", "theme", "install"),
+        ("omarchy", "theme", "remove"),
+    }:
+        return True
+    if len(route) > 1 and route[1] in {
+        "install",
+        "remove",
+        "reinstall",
+        "refresh",
+        "update",
+    }:
+        return True
+    if route == ("omarchy", "bar") and argv[len(route) : len(route) + 1] in {
+        ("set",),
+        ("move",),
+    }:
+        return True
+    return route == ("omarchy", "shell") and any(
+        token in {"setPluginEnabled", "enablePlugin"} for token in argv[len(route) :]
+    )
+
+
+def _confirmation_decision(
+    command: str,
+    argv: tuple[str, ...],
+    *,
+    confirmed: bool,
+    pending: PendingConfirmation | None,
+    now: float,
+) -> Decision:
+    if (
+        confirmed
+        and pending is not None
+        and pending.argv == argv
+        and now - pending.ts <= 30
+        and pending.user_turns_since > 0
+    ):
+        return Decision("run", argv)
+    return Decision("confirm", argv, command)
+
+
+def _decide_herdr(
+    command: str,
+    argv: tuple[str, ...],
+    *,
+    confirmed: bool,
+    pending: PendingConfirmation | None,
+    now: float,
+) -> Decision:
+    if len(argv) < 2:
+        return Decision("reject", reason="bare herdr is not allowed")
+    route = (argv[1],) if argv[1] == "status" else tuple(argv[1:3])
+    if route not in HERDR_ALLOW:
+        return Decision("reject", reason="unknown herdr route")
+    arguments = argv[1 + len(route) :]
+    if any(
+        token in {"--wait", "--remote", "--session"} or token.startswith("--until")
+        for token in arguments
+    ):
+        return Decision("reject", reason="blocking or remote herdr flag")
+    control_key = route in {("agent", "send-keys"), ("pane", "send-keys")} and any(
+        "ctrl+" in token.lower() for token in arguments
+    )
+    if route in HERDR_CONFIRM or control_key:
+        return _confirmation_decision(
+            command,
+            argv,
+            confirmed=confirmed,
+            pending=pending,
+            now=now,
+        )
+    return Decision("run", argv)
+
+
+def _browser_route(argv: tuple[str, ...]) -> tuple[tuple[str, ...], int] | None:
+    if len(argv) < 2:
+        return None
+    command = argv[1]
+    if command in BROWSER_SINGLE_ALLOW:
+        return (command,), 2
+    if command == "tab" and len(argv) >= 3:
+        operation = argv[2]
+        if operation in {"list", "new", "close"}:
+            return ("tab", operation), 3
+        if re.fullmatch(r"t\d+", operation) or re.fullmatch(
+            r"[0-9a-fA-F]{16,64}", operation
+        ):
+            return ("tab", "switch"), 3
+        return None
+    if command == "get" and len(argv) >= 3 and argv[2] in BROWSER_GET_ALLOW:
+        return ("get", argv[2]), 3
+    if command == "is" and len(argv) >= 3 and argv[2] in BROWSER_IS_ALLOW:
+        return ("is", argv[2]), 3
+    if command == "keyboard" and len(argv) >= 3 and argv[2] == "type":
+        return ("keyboard", "type"), 3
+    return None
+
+
+def _browser_flags_allowed(
+    route: tuple[str, ...], argv: tuple[str, ...], start: int
+) -> bool:
+    if route == ("close",) and argv[start:] == ("--all",):
+        return True
+    if route == ("snapshot",):
+        index = start
+        while index < len(argv):
+            token = argv[index]
+            if token in {"-i", "-c"}:
+                index += 1
+                continue
+            if token == "-d" and index + 1 < len(argv) and argv[index + 1].isdigit():
+                index += 2
+                continue
+            return False
+        return True
+    exempt_indexes: set[int] = set()
+    if route in {("fill",), ("type",)} and len(argv) > 3:
+        exempt_indexes.add(3)
+    elif route == ("keyboard", "type"):
+        exempt_indexes.update(range(start, len(argv)))
+    elif route == ("find",) and len(argv) > 3:
+        exempt_indexes.add(3)
+    return not any(
+        token.startswith("-") and index not in exempt_indexes
+        for index, token in enumerate(argv[start:], start=start)
+    )
+
+
+def _decide_browser(
+    command: str,
+    argv: tuple[str, ...],
+    *,
+    confirmed: bool,
+    pending: PendingConfirmation | None,
+    now: float,
+) -> Decision:
+    matched = _browser_route(argv)
+    if matched is None:
+        return Decision("reject", reason="unknown browser route")
+    route, argument_start = matched
+    if route == ("tab", "switch") and len(argv) != 3:
+        return Decision("reject", reason="tab switch takes one reference")
+    if route == ("screenshot",) and len(argv) != 2:
+        return Decision("reject", reason="screenshot paths are not allowed")
+    if (
+        route == ("wait",)
+        and len(argv) > 2
+        and argv[2].isdigit()
+        and int(argv[2]) > 20_000
+    ):
+        return Decision("reject", reason="browser wait exceeds 20 seconds")
+    if route == ("close",) and argv[2:] not in {(), ("--all",)}:
+        return Decision("reject", reason="unsupported close arguments")
+    if not _browser_flags_allowed(route, argv, argument_start):
+        return Decision("reject", reason="browser flags are not allowed")
+    if route in BROWSER_CONFIRM:
+        return _confirmation_decision(
+            command,
+            argv,
+            confirmed=confirmed,
+            pending=pending,
+            now=now,
+        )
+    return Decision("run", argv)
+
+
+def decide(
+    command: str,
+    *,
+    catalog: Catalog,
+    confirmed: bool = False,
+    pending: PendingConfirmation | None = None,
+    now: float | None = None,
+    dispatchers: set[str] | frozenset[str] = frozenset(),
+) -> Decision:
+    if any(character in command for character in ("\n", "\r", "\0")):
+        return Decision("reject", reason="control character")
+    if len(command) > 2000:
+        return Decision("reject", reason="command too long")
+    try:
+        argv = tuple(shlex.split(command))
+    except ValueError:
+        return Decision("reject", reason="invalid quoting")
+    if not argv or argv[0] not in {"omarchy", "hyprctl", "herdr", "agent-browser"}:
+        return Decision("reject", reason="unsupported command")
+    if argv and argv[0] == "omarchy":
+        for size in range(len(argv), 0, -1):
+            candidate = argv[:size]
+            if candidate in catalog.routes or candidate in catalog.aliases:
+                route = catalog.aliases.get(candidate, candidate)
+                if _omarchy_requires_confirmation(argv, route):
+                    return _confirmation_decision(
+                        command,
+                        argv,
+                        confirmed=confirmed,
+                        pending=pending,
+                        now=time.monotonic() if now is None else now,
+                    )
+                return Decision("run", argv)
+    if argv[0] == "hyprctl":
+        if len(argv) < 3 or argv[1] != "dispatch" or argv[2] not in dispatchers:
+            return Decision("reject", reason="unknown dispatcher")
+        if argv[2] == "exit":
+            return _confirmation_decision(
+                command,
+                argv,
+                confirmed=confirmed,
+                pending=pending,
+                now=time.monotonic() if now is None else now,
+            )
+        return Decision("run", argv)
+    if argv[0] == "herdr":
+        return _decide_herdr(
+            command,
+            argv,
+            confirmed=confirmed,
+            pending=pending,
+            now=time.monotonic() if now is None else now,
+        )
+    if argv[0] == "agent-browser":
+        return _decide_browser(
+            command,
+            argv,
+            confirmed=confirmed,
+            pending=pending,
+            now=time.monotonic() if now is None else now,
+        )
+    return Decision("reject", reason="unknown route")
