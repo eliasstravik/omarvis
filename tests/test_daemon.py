@@ -202,3 +202,26 @@ def test_herdr_json_results_are_compacted_before_returning_to_the_agent():
         "w58:p6 claude blocked cwd=~/dev/omarvis"
     )
     assert len(result["stdout"]) <= 600
+
+
+def test_client_tool_result_is_serialized_for_the_elevenlabs_protocol():
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        return ExecutionResult(None, started=True)
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+    result = handler.handle_client_tool(
+        {"command": "omarchy launch terminal herdr"}
+    )
+
+    assert isinstance(result, str)
+    assert json.loads(result) == {
+        "status": "started",
+        "command": "omarchy launch terminal herdr",
+    }

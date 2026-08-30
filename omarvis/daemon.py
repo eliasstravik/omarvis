@@ -320,6 +320,12 @@ class RunToolHandler:
         except Exception as error:  # noqa: BLE001 - tool failures must become tool responses
             return {"status": "error", "reason": str(error)}
 
+    def handle_client_tool(self, parameters: Mapping[str, Any]) -> str:
+        """Serialize a tool result for ElevenLabs' string-only event field."""
+        return json.dumps(
+            self.handle(parameters), ensure_ascii=False, separators=(",", ":")
+        )
+
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "agent_id": "",
@@ -574,7 +580,7 @@ def run_session(
         event_sink=on_tool_event,
     )
     client_tools = ClientTools()
-    client_tools.register("run", handler.handle)
+    client_tools.register("run", handler.handle_client_tool)
 
     def on_user(text: str) -> None:
         handler.note_user_transcript(text)
