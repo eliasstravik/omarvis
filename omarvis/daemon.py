@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .catalog import Catalog, compact_herdr_agents, compact_herdr_workspaces
+from .catalog import (
+    Catalog,
+    compact_herdr_agents,
+    compact_herdr_workspaces,
+    compact_hypr_clients,
+)
 from .policy import PendingConfirmation, decide
 
 
@@ -101,6 +106,8 @@ class RunToolHandler:
         confirmation_wait: float = 2.0,
         context_sink: Callable[[str], None] | None = None,
         event_sink: Callable[[Mapping[str, Any]], None] | None = None,
+        state_provider: Callable[[], str] | None = None,
+        state_refresh_delay: float = 2.0,
     ) -> None:
         self.catalog = catalog
         self.dispatchers = frozenset(dispatchers)
@@ -110,10 +117,13 @@ class RunToolHandler:
         self.confirmation_wait = confirmation_wait
         self.context_sink = context_sink
         self.event_sink = event_sink
+        self.state_provider = state_provider
+        self.state_refresh_delay = state_refresh_delay
         self._condition = threading.Condition()
         self._pending: PendingConfirmation | None = None
         self._browser_mode: str | None = None
         self._browser_tab_owned = False
+        self._refresh_thread: threading.Thread | None = None
 
     def _execute_default(
         self,
@@ -233,6 +243,25 @@ class RunToolHandler:
             )
         return self._browser_prefix() + command, None
 
+    @staticmethod
+    def _mutates_desktop(argv: tuple[str, ...]) -> bool:
+        if argv[:2] == ("hyprctl", "dispatch"):
+            return True
+        return argv[:1] == ("omarchy",) and argv[1:2] in {("launch",), ("hyprland",)}
+
+    def _schedule_state_refresh(self) -> None:
+        if self.state_provider is None or self.context_sink is None:
+            return
+        if self._refresh_thread is not None and self._refresh_thread.is_alive():
+            return
+
+        def push() -> None:
+            time.sleep(self.state_refresh_delay)
+            self.context_sink(self.state_provider())
+
+        self._refresh_thread = threading.Thread(target=push, daemon=True)
+        self._refresh_thread.start()
+
     def handle(self, parameters: Mapping[str, Any]) -> dict[str, Any]:
         try:
             command = str(parameters.get("command", ""))
@@ -257,6 +286,8 @@ class RunToolHandler:
             timeout = 3.0
             kill_on_timeout = False
             stdout_limit = 400
+            if decision.argv[:2] == ("hyprctl", "clients"):
+                stdout_limit = 1500
             if decision.argv[:1] == ("agent-browser",):
                 prepared, error = self._prepare_browser(decision.argv)
                 if error is not None:
@@ -274,6 +305,10 @@ class RunToolHandler:
             )
             if result.timed_out:
                 return {"status": "failed", "reason": "timeout"}
+            if (result.started or result.exit_code == 0) and self._mutates_desktop(
+                decision.argv
+            ):
+                self._schedule_state_refresh()
             if result.started:
                 if self.event_sink is not None:
                     self.event_sink({"event": "ran", "command": command, "exit": None})
@@ -305,6 +340,11 @@ class RunToolHandler:
                         stdout = json.dumps(
                             value, ensure_ascii=False, separators=(",", ":")
                         )[:600]
+                except (json.JSONDecodeError, TypeError):
+                    stdout = stdout[:600]
+            if result.exit_code == 0 and decision.argv[:2] == ("hyprctl", "clients"):
+                try:
+                    stdout = "\n".join(compact_hypr_clients(json.loads(stdout)))
                 except (json.JSONDecodeError, TypeError):
                     stdout = stdout[:600]
             if self.event_sink is not None:
@@ -551,7 +591,12 @@ def run_session(
         ConversationInitiationData,
     )
 
-    from .catalog import HYPR_DISPATCHERS, catalog_variables, load_catalog
+    from .catalog import (
+        HYPR_DISPATCHERS,
+        catalog_variables,
+        desktop_state,
+        load_catalog,
+    )
 
     stop_requested = threading.Event()
     session_ended = threading.Event()
@@ -578,6 +623,7 @@ def run_session(
         config=config,
         context_sink=contextual_updates.put,
         event_sink=on_tool_event,
+        state_provider=desktop_state,
     )
     client_tools = ClientTools()
     client_tools.register("run", handler.handle_client_tool)

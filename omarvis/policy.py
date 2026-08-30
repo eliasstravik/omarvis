@@ -5,7 +5,7 @@ import shlex
 import time
 from dataclasses import dataclass
 
-from .catalog import Catalog
+from .catalog import HYPR_READ_COMMANDS, Catalog
 
 HERDR_IMMEDIATE = frozenset(
     {
@@ -339,6 +339,8 @@ def decide(
                     )
                 return Decision("run", argv)
     if argv[0] == "hyprctl":
+        if argv in HYPR_READ_COMMANDS:
+            return Decision("run", argv)
         if len(argv) < 3 or argv[1] != "dispatch" or argv[2] not in dispatchers:
             return Decision("reject", reason="unknown dispatcher")
         if argv[2] == "exit":

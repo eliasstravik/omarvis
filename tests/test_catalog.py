@@ -2,12 +2,16 @@ import json
 from pathlib import Path
 
 from omarvis.catalog import (
+    HYPR_DISPATCHERS,
     CommandOutput,
     browser_catalog,
     catalog_from_data,
     compact_herdr_agents,
+    compact_hypr_clients,
     current_state,
+    desktop_state,
     herdr_catalog_from_help,
+    hyprland_prompt,
     load_catalog,
     load_herdr_catalog,
 )
@@ -85,6 +89,53 @@ def test_herdr_agent_state_is_compacted_for_spoken_context():
         "w58:p5 codex idle name=reviewer cwd=~/dev/gtm-skills",
         "w58:p6 claude blocked cwd=~/dev/omarvis",
     ]
+
+
+def test_hyprland_prompt_documents_closing_windows():
+    prompt = hyprland_prompt()
+
+    assert "closewindow" in HYPR_DISPATCHERS
+    assert "hyprctl dispatch closewindow class:<class>" in prompt
+
+
+def test_hyprland_prompt_advertises_read_only_state_queries():
+    prompt = hyprland_prompt()
+
+    assert "hyprctl clients -j" in prompt
+    assert "hyprctl activewindow -j" in prompt
+    assert "hyprctl activeworkspace -j" in prompt
+
+
+def test_hypr_clients_are_compacted_with_their_workspace():
+    payload = [
+        {"class": "firefox", "title": "GitHub", "workspace": {"id": 3}},
+        {"class": "foot", "title": "tests", "workspace": {"id": 1}},
+        "garbage",
+    ]
+
+    assert compact_hypr_clients(payload) == [
+        "firefox — GitHub (ws 3)",
+        "foot — tests (ws 1)",
+    ]
+
+
+def test_desktop_state_is_one_compact_refresh_line():
+    responses = {
+        ("hyprctl", "activeworkspace", "-j"): '{"id":3}',
+        ("hyprctl", "activewindow", "-j"): '{"class":"firefox","title":"GitHub"}',
+        ("hyprctl", "clients", "-j"): (
+            '[{"class":"firefox","title":"GitHub","workspace":{"id":3}},'
+            '{"class":"foot","title":"tests","workspace":{"id":1}}]'
+        ),
+    }
+
+    def runner(argv, timeout):
+        return CommandOutput(0, responses[tuple(argv)], "")
+
+    assert desktop_state(runner=runner) == (
+        "Desktop: workspace 3; focused firefox — GitHub; "
+        "windows: firefox — GitHub (ws 3), foot — tests (ws 1)"
+    )
 
 
 def test_current_state_collects_desktop_and_herdr_context_without_browser_probe():

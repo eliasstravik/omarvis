@@ -162,6 +162,31 @@ def test_hyprland_dispatchers_are_allowlisted_and_exit_requires_confirmation():
 @pytest.mark.parametrize(
     "command",
     [
+        "hyprctl clients -j",
+        "hyprctl activewindow -j",
+        "hyprctl activeworkspace -j",
+    ],
+)
+def test_read_only_hyprctl_state_queries_run_without_a_dispatcher(command):
+    assert decide(command, catalog=omarchy_catalog()).kind == "run"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "hyprctl clients",
+        "hyprctl clients -j --verbose",
+        "hyprctl keyword general:gaps_in 0",
+        "hyprctl monitors -j",
+    ],
+)
+def test_hyprctl_outside_reads_and_allowed_dispatchers_is_rejected(command):
+    assert decide(command, catalog=omarchy_catalog()).kind == "reject"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         "herdr agent list",
         'herdr agent prompt w58:p5 "run the tests and fix $FAILURES"',
         "herdr pane split --current --direction right --no-focus",
