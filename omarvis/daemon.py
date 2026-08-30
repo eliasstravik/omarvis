@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 from .catalog import (
     Catalog,
+    clean_hypr_error,
     compact_herdr_agents,
     compact_herdr_workspaces,
     compact_hypr_clients,
@@ -375,12 +376,17 @@ class RunToolHandler:
                 self.event_sink(
                     {"event": "ran", "command": command, "exit": result.exit_code}
                 )
-            return {
+            response = {
                 "status": "ok" if succeeded else "failed",
                 "exit_code": result.exit_code,
                 "stdout": stdout[:stdout_limit],
                 "stderr": result.stderr[:200],
             }
+            if not succeeded and decision.argv[:2] == ("hyprctl", "dispatch"):
+                response["stdout"] = clean_hypr_error(stdout)[:stdout_limit]
+                if self.state_provider is not None:
+                    response["desktop"] = self.state_provider()
+            return response
         except Exception as error:  # noqa: BLE001 - tool failures must become tool responses
             return {"status": "error", "reason": str(error)}
 
