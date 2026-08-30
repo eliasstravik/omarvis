@@ -88,7 +88,7 @@ updated=$(jq \
   --arg browser_executable_path "$BROWSER_EXECUTABLE" \
   '. + {
     agent_id: (.agent_id // ""),
-    llm: (.llm // "gemini-2.5-flash"),
+    llm: (.llm // "gpt-5.6-sol"),
     input_device_index: (.input_device_index // null),
     herdr_announcements: (.herdr_announcements // true),
     browser_mode: $browser_mode,
