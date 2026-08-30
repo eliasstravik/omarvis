@@ -338,17 +338,43 @@ def _lua_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+# Prefixes whose payload Hyprland treats as an RE2 regex (case-sensitive full
+# match); Omarvis injects (?i) so a spoken "Chromium" still matches app_id
+# "chromium". The literal prefixes compare exact strings and must not change.
+_REGEX_SELECTOR_PREFIXES = ("class:", "initialclass:", "title:", "initialtitle:", "tag:")
+_LITERAL_SELECTOR_PREFIXES = ("address:", "pid:", "stableid:")
+_KEYWORD_SELECTORS = ("active", "floating", "tiled")
+
+
+def _window_selector(argument: str) -> str:
+    if argument.startswith(_LITERAL_SELECTOR_PREFIXES) or argument.startswith(
+        _KEYWORD_SELECTORS
+    ):
+        return argument
+    for prefix in _REGEX_SELECTOR_PREFIXES:
+        if argument.startswith(prefix):
+            rest = argument[len(prefix) :]
+            return argument if rest.startswith("(?i)") else f"{prefix}(?i){rest}"
+    # A bare argument selects nothing on Hyprland 0.55 (empty class regex).
+    return f"class:(?i){argument}"
+
+
+def clean_hypr_error(text: str) -> str:
+    """Strip the Lua eval chunk-source noise from a hyprctl error reply."""
+    return re.sub(r'\[string "[^\n]*"\]:\d+:\s*', "", text)
+
+
 def _lua_dispatch(dispatcher: str, argument: str) -> str | None:
     if dispatcher == "workspace":
         return f"hl.dsp.focus({{ workspace = {_lua_quote(argument)} }})"
     if dispatcher == "movetoworkspace":
         return f"hl.dsp.window.move({{ workspace = {_lua_quote(argument)} }})"
     if dispatcher == "focuswindow":
-        return f"hl.dsp.focus({{ window = {_lua_quote(argument)} }})"
+        return f"hl.dsp.focus({{ window = {_lua_quote(_window_selector(argument))} }})"
     if dispatcher == "killactive":
         return "hl.dsp.window.close()"
     if dispatcher == "closewindow":
-        return f"hl.dsp.window.close({{ window = {_lua_quote(argument)} }})"
+        return f"hl.dsp.window.close({{ window = {_lua_quote(_window_selector(argument))} }})"
     if dispatcher == "fullscreen":
         if argument == "1":
             return 'hl.dsp.window.fullscreen({ mode = "maximized", action = "toggle" })'

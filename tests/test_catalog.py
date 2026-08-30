@@ -8,6 +8,7 @@ from omarvis.catalog import (
     CommandOutput,
     browser_catalog,
     catalog_from_data,
+    clean_hypr_error,
     compact_herdr_agents,
     compact_hypr_clients,
     current_state,
@@ -115,11 +116,14 @@ def test_hyprland_prompt_advertises_read_only_state_queries():
         ("workspace 2", 'hl.dsp.focus({ workspace = "2" })'),
         ("workspace +1", 'hl.dsp.focus({ workspace = "+1" })'),
         ("movetoworkspace 3", 'hl.dsp.window.move({ workspace = "3" })'),
-        ("focuswindow class:chromium", 'hl.dsp.focus({ window = "class:chromium" })'),
+        (
+            "focuswindow class:chromium",
+            'hl.dsp.focus({ window = "class:(?i)chromium" })',
+        ),
         ("killactive", "hl.dsp.window.close()"),
         (
             "closewindow class:chromium",
-            'hl.dsp.window.close({ window = "class:chromium" })',
+            'hl.dsp.window.close({ window = "class:(?i)chromium" })',
         ),
         ("fullscreen", 'hl.dsp.window.fullscreen({ action = "toggle" })'),
         ("fullscreen 0", 'hl.dsp.window.fullscreen({ action = "toggle" })'),
@@ -148,13 +152,84 @@ def test_legacy_dispatchers_translate_to_lua_expressions(legacy, lua):
     assert translate_dispatch(argv) == ("hyprctl", "dispatch", lua)
 
 
+@pytest.mark.parametrize(
+    "legacy, lua",
+    [
+        (
+            "focuswindow class:Chromium",
+            'hl.dsp.focus({ window = "class:(?i)Chromium" })',
+        ),
+        (
+            "closewindow class:Chromium",
+            'hl.dsp.window.close({ window = "class:(?i)Chromium" })',
+        ),
+        (
+            "closewindow initialclass:Chromium",
+            'hl.dsp.window.close({ window = "initialclass:(?i)Chromium" })',
+        ),
+        (
+            "closewindow title:GitHub",
+            'hl.dsp.window.close({ window = "title:(?i)GitHub" })',
+        ),
+    ],
+)
+def test_window_selectors_match_case_insensitively(legacy, lua):
+    argv = ("hyprctl", "dispatch", *legacy.split())
+
+    assert translate_dispatch(argv) == ("hyprctl", "dispatch", lua)
+
+
+def test_bare_window_arguments_become_class_selectors():
+    argv = ("hyprctl", "dispatch", "focuswindow", "chromium")
+
+    assert translate_dispatch(argv) == (
+        "hyprctl",
+        "dispatch",
+        'hl.dsp.focus({ window = "class:(?i)chromium" })',
+    )
+
+
+def test_window_selectors_do_not_double_case_flags():
+    argv = ("hyprctl", "dispatch", "focuswindow", "class:(?i)chromium")
+
+    assert translate_dispatch(argv) == (
+        "hyprctl",
+        "dispatch",
+        'hl.dsp.focus({ window = "class:(?i)chromium" })',
+    )
+
+
+def test_address_selectors_pass_through_unmodified():
+    argv = ("hyprctl", "dispatch", "focuswindow", "address:0x55d2a7b0")
+
+    assert translate_dispatch(argv) == (
+        "hyprctl",
+        "dispatch",
+        'hl.dsp.focus({ window = "address:0x55d2a7b0" })',
+    )
+
+
+def test_clean_hypr_error_strips_lua_chunk_noise():
+    raw = (
+        'WARN: [string "return hl.dispatch(hl.dsp.focus({ window = "cl..."]:1: '
+        "hl.focus: window not found"
+    )
+
+    assert clean_hypr_error(raw) == "WARN: hl.focus: window not found"
+
+
+def test_clean_hypr_error_leaves_plain_text_alone():
+    assert clean_hypr_error("ok") == "ok"
+    assert clean_hypr_error("Invalid dispatcher") == "Invalid dispatcher"
+
+
 def test_dispatch_translation_escapes_lua_string_arguments():
     argv = ("hyprctl", "dispatch", "closewindow", 'class:a"b\\c')
 
     assert translate_dispatch(argv) == (
         "hyprctl",
         "dispatch",
-        'hl.dsp.window.close({ window = "class:a\\"b\\\\c" })',
+        'hl.dsp.window.close({ window = "class:(?i)a\\"b\\\\c" })',
     )
 
 

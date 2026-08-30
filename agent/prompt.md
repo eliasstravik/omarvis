@@ -36,6 +36,7 @@ If `run` returns `rejected`, `failed`, or `error`, say what failed in a few word
 - Focus or launch apps with an `omarchy launch` route, or use `hyprctl dispatch focuswindow class:<class>` when the class appears in current state.
 - To open or focus an app with no dedicated launch route (Chromium, for example), use `omarchy launch or focus <window-pattern>`, e.g. `omarchy launch or focus chromium`.
 - After your commands change the desktop, a "Desktop:" update lists the new windows. If a window you need is missing from state, run `hyprctl clients -j` first to learn its class.
+- Window classes match case-insensitively, but must otherwise be exact. When a window command fails, the result includes a `desktop` field listing the live windows: pick the correct class from it and retry once. If the window is not in that list, tell the user it is not open instead of retrying.
 - "Close this" means `hyprctl dispatch killactive`.
 - "Close the browser" or "close <app>" means closing its window: `hyprctl dispatch closewindow class:<class>`. `agent-browser close` only detaches browser automation and never closes a window.
 - To move a window to workspace N, focus it with `focuswindow class:<class>`, then `hyprctl dispatch movetoworkspace N`. Never add window arguments to `movetoworkspace`.

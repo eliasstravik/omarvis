@@ -298,7 +298,11 @@ def test_dispatches_are_translated_to_lua_on_hyprland_055():
     assert result["status"] == "ok"
     assert calls == [
         ("hyprctl", "version"),
-        ("hyprctl", "dispatch", 'hl.dsp.window.close({ window = "class:chromium" })'),
+        (
+            "hyprctl",
+            "dispatch",
+            'hl.dsp.window.close({ window = "class:(?i)chromium" })',
+        ),
     ]
 
 
@@ -352,6 +356,58 @@ def test_dispatch_error_reply_with_exit_zero_is_reported_as_failure():
 
     assert result["status"] == "failed"
     assert "expected a dispatcher" in result["stdout"]
+
+
+def test_failed_dispatches_return_cleaned_error_and_desktop_state():
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        if tuple(argv) == ("hyprctl", "version"):
+            return ExecutionResult(0, LUA_VERSION, "")
+        return ExecutionResult(
+            0,
+            'WARN: [string "return hl.dispatch(hl.dsp.window.close({ window = "cl..."]:1: '
+            "hl.window.close: window not found",
+            "",
+        )
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers={"closewindow"},
+        config={},
+        executor=executor,
+        confirmation_wait=0,
+        state_provider=lambda: "Desktop: workspace 1; focused foot; windows: chromium — GitHub (ws 1)",
+    )
+
+    result = handler.handle({"command": "hyprctl dispatch closewindow class:Cromium"})
+
+    assert result["status"] == "failed"
+    assert result["stdout"] == "WARN: hl.window.close: window not found"
+    assert '[string "' not in result["stdout"]
+    assert result["desktop"] == (
+        "Desktop: workspace 1; focused foot; windows: chromium — GitHub (ws 1)"
+    )
+
+
+def test_successful_dispatches_do_not_include_desktop_state_inline():
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        if tuple(argv) == ("hyprctl", "version"):
+            return ExecutionResult(0, LUA_VERSION, "")
+        return ExecutionResult(0, "ok", "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers={"closewindow"},
+        config={},
+        executor=executor,
+        confirmation_wait=0,
+        state_provider=lambda: "Desktop: fresh",
+        state_refresh_delay=0.0,
+    )
+
+    result = handler.handle({"command": "hyprctl dispatch closewindow class:chromium"})
+
+    assert result["status"] == "ok"
+    assert "desktop" not in result
 
 
 def test_failed_dispatches_do_not_push_a_state_refresh():
