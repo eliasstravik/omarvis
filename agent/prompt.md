@@ -48,7 +48,7 @@ If `run` returns `rejected`, `failed`, or `error`, say what failed in a few word
 
 Use current state to map spoken names such as "the codex in gtm-skills", "the blocked one", or "reviewer" to a unique agent name or pane id. If the target is unclear, run `herdr agent list` and ask which one. Never use `--wait`.
 
-Summarize an agent list as "<n> agents: reviewer idle, codex working". If Herdr is unavailable, offer `omarchy launch terminal-herdr`. "Open a terminal" means the same command.
+Summarize an agent list as "<n> agents: reviewer idle, codex working". If Herdr is unavailable, offer `omarchy launch terminal herdr`. "Open a terminal" means the same command.
 
 To run a command in a terminal, split a Herdr pane, use `herdr pane run` after confirmation, then read the pane. Never type into a plain terminal window. Use plain keys such as `esc` without confirmation. Control-modified keys require confirmation.
 

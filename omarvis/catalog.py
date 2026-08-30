@@ -247,7 +247,7 @@ def current_state(
         lines.extend(f"- {line}" for line in workspace_lines + agent_lines)
     else:
         lines.append(
-            "Herdr: not running (say 'open herdr' to run omarchy launch terminal-herdr)"
+            "Herdr: not running (say 'open herdr' to run omarchy launch terminal herdr)"
         )
     browser_mode = str((config or {}).get("browser_mode", "unavailable"))
     lines.append(f"Browser: unprobed:{browser_mode}")
@@ -330,6 +330,75 @@ HYPR_DISPATCHER_DOCS = {
     "exit": "exit (requires confirmation)",
 }
 HYPR_DISPATCHERS = frozenset(HYPR_DISPATCHER_DOCS)
+
+_LUA_DIRECTIONS = {"l": "left", "r": "right", "u": "up", "d": "down"}
+
+
+def _lua_quote(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _lua_dispatch(dispatcher: str, argument: str) -> str | None:
+    if dispatcher == "workspace":
+        return f"hl.dsp.focus({{ workspace = {_lua_quote(argument)} }})"
+    if dispatcher == "movetoworkspace":
+        return f"hl.dsp.window.move({{ workspace = {_lua_quote(argument)} }})"
+    if dispatcher == "focuswindow":
+        return f"hl.dsp.focus({{ window = {_lua_quote(argument)} }})"
+    if dispatcher == "killactive":
+        return "hl.dsp.window.close()"
+    if dispatcher == "closewindow":
+        return f"hl.dsp.window.close({{ window = {_lua_quote(argument)} }})"
+    if dispatcher == "fullscreen":
+        if argument == "1":
+            return 'hl.dsp.window.fullscreen({ mode = "maximized", action = "toggle" })'
+        return 'hl.dsp.window.fullscreen({ action = "toggle" })'
+    if dispatcher == "togglefloating":
+        return 'hl.dsp.window.float({ action = "toggle" })'
+    if dispatcher == "movefocus":
+        direction = _LUA_DIRECTIONS.get(argument, argument)
+        return f"hl.dsp.focus({{ direction = {_lua_quote(direction)} }})"
+    if dispatcher == "swapwindow":
+        direction = _LUA_DIRECTIONS.get(argument, argument)
+        return f"hl.dsp.window.swap({{ direction = {_lua_quote(direction)} }})"
+    if dispatcher == "togglesplit":
+        return 'hl.dsp.layout("togglesplit")'
+    if dispatcher == "centerwindow":
+        return "hl.dsp.window.center()"
+    if dispatcher == "pin":
+        return 'hl.dsp.window.pin({ action = "toggle" })'
+    if dispatcher == "togglegroup":
+        return "hl.dsp.group.toggle()"
+    if dispatcher == "changegroupactive":
+        return "hl.dsp.group.prev()" if argument == "b" else "hl.dsp.group.next()"
+    if dispatcher == "cyclenext":
+        return "hl.dsp.window.cycle_next()"
+    if dispatcher == "focusmonitor":
+        monitor = {"+1": "+", "-1": "-"}.get(argument, argument)
+        return f"hl.dsp.focus({{ monitor = {_lua_quote(monitor)} }})"
+    if dispatcher == "exit":
+        return "hl.dsp.exit()"
+    return None
+
+
+def translate_dispatch(argv: tuple[str, ...]) -> tuple[str, ...]:
+    """Rewrite a legacy dispatcher into the Hyprland 0.55+ Lua form."""
+    if argv[:2] != ("hyprctl", "dispatch") or len(argv) < 3:
+        return argv
+    lua = _lua_dispatch(argv[2], argv[3] if len(argv) > 3 else "")
+    if lua is None:
+        return argv
+    return ("hyprctl", "dispatch", lua)
+
+
+def hyprland_speaks_lua(version_output: str) -> bool:
+    match = re.search(r"tag:\s*v?(\d+)\.(\d+)", version_output, re.IGNORECASE)
+    if match is None:
+        match = re.search(r"\bv?(\d+)\.(\d+)\.\d+", version_output)
+    if match is None:
+        return False
+    return (int(match.group(1)), int(match.group(2))) >= (0, 55)
+
 
 HYPR_READ_COMMANDS = frozenset(
     {

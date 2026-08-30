@@ -268,6 +268,118 @@ def test_read_only_commands_do_not_trigger_a_state_refresh():
     assert not _wait_for(lambda: updates, timeout=0.1)
 
 
+LUA_VERSION = "Hyprland, built from branch main at commit abc123  (tag: v0.55.1)\n"
+LEGACY_VERSION = "Hyprland, built from branch main at commit abc123  (tag: v0.48.1)\n"
+
+
+def _dispatch_handler(executor):
+    return RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers={"workspace", "closewindow"},
+        config={},
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+
+def test_dispatches_are_translated_to_lua_on_hyprland_055():
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append(tuple(argv))
+        if tuple(argv) == ("hyprctl", "version"):
+            return ExecutionResult(0, LUA_VERSION, "")
+        return ExecutionResult(0, "ok", "")
+
+    handler = _dispatch_handler(executor)
+
+    result = handler.handle({"command": "hyprctl dispatch closewindow class:chromium"})
+
+    assert result["status"] == "ok"
+    assert calls == [
+        ("hyprctl", "version"),
+        ("hyprctl", "dispatch", 'hl.dsp.window.close({ window = "class:chromium" })'),
+    ]
+
+
+def test_hyprland_version_is_probed_once_per_session():
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append(tuple(argv))
+        if tuple(argv) == ("hyprctl", "version"):
+            return ExecutionResult(0, LUA_VERSION, "")
+        return ExecutionResult(0, "ok", "")
+
+    handler = _dispatch_handler(executor)
+
+    handler.handle({"command": "hyprctl dispatch workspace 2"})
+    handler.handle({"command": "hyprctl dispatch workspace 3"})
+
+    assert calls.count(("hyprctl", "version")) == 1
+
+
+def test_dispatches_stay_legacy_on_older_hyprland():
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append(tuple(argv))
+        if tuple(argv) == ("hyprctl", "version"):
+            return ExecutionResult(0, LEGACY_VERSION, "")
+        return ExecutionResult(0, "ok", "")
+
+    handler = _dispatch_handler(executor)
+
+    result = handler.handle({"command": "hyprctl dispatch workspace 2"})
+
+    assert result["status"] == "ok"
+    assert ("hyprctl", "dispatch", "workspace", "2") in calls
+
+
+def test_dispatch_error_reply_with_exit_zero_is_reported_as_failure():
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        if tuple(argv) == ("hyprctl", "version"):
+            return ExecutionResult(0, LUA_VERSION, "")
+        return ExecutionResult(
+            0,
+            "error: return hl.dispatch(exit):1: hl.dispatch: expected a dispatcher",
+            "",
+        )
+
+    handler = _dispatch_handler(executor)
+
+    result = handler.handle({"command": "hyprctl dispatch closewindow class:chromium"})
+
+    assert result["status"] == "failed"
+    assert "expected a dispatcher" in result["stdout"]
+
+
+def test_failed_dispatches_do_not_push_a_state_refresh():
+    updates = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        if tuple(argv) == ("hyprctl", "version"):
+            return ExecutionResult(0, LUA_VERSION, "")
+        return ExecutionResult(0, "error: no such window", "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers={"closewindow"},
+        config={},
+        executor=executor,
+        confirmation_wait=0,
+        context_sink=updates.append,
+        state_provider=lambda: "Desktop: fresh",
+        state_refresh_delay=0.0,
+    )
+
+    assert (
+        handler.handle({"command": "hyprctl dispatch closewindow class:foo"})["status"]
+        == "failed"
+    )
+    assert not _wait_for(lambda: updates, timeout=0.1)
+
+
 def test_hyprctl_clients_results_are_compacted_before_returning_to_the_agent():
     payload = (
         '[{"class":"firefox","title":"GitHub","workspace":{"id":3}},'
