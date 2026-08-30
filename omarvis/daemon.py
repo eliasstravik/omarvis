@@ -20,6 +20,8 @@ from .catalog import (
     compact_herdr_agents,
     compact_herdr_workspaces,
     compact_hypr_clients,
+    hyprland_speaks_lua,
+    translate_dispatch,
 )
 from .policy import PendingConfirmation, decide
 
@@ -121,6 +123,7 @@ class RunToolHandler:
         self.state_refresh_delay = state_refresh_delay
         self._condition = threading.Condition()
         self._pending: PendingConfirmation | None = None
+        self._hypr_lua: bool | None = None
         self._browser_mode: str | None = None
         self._browser_tab_owned = False
         self._refresh_thread: threading.Thread | None = None
@@ -243,6 +246,17 @@ class RunToolHandler:
             )
         return self._browser_prefix() + command, None
 
+    def _hyprland_speaks_lua(self) -> bool:
+        if self._hypr_lua is None:
+            probe = self.executor(
+                ("hyprctl", "version"),
+                timeout=2.0,
+                kill_on_timeout=True,
+                stdout_limit=1500,
+            )
+            self._hypr_lua = probe.exit_code == 0 and hyprland_speaks_lua(probe.stdout)
+        return self._hypr_lua
+
     @staticmethod
     def _mutates_desktop(argv: tuple[str, ...]) -> bool:
         if argv[:2] == ("hyprctl", "dispatch"):
@@ -288,6 +302,10 @@ class RunToolHandler:
             stdout_limit = 400
             if decision.argv[:2] == ("hyprctl", "clients"):
                 stdout_limit = 1500
+            if decision.argv[:2] == ("hyprctl", "dispatch") and (
+                self._hyprland_speaks_lua()
+            ):
+                execution_argv = translate_dispatch(decision.argv)
             if decision.argv[:1] == ("agent-browser",):
                 prepared, error = self._prepare_browser(decision.argv)
                 if error is not None:
@@ -305,9 +323,15 @@ class RunToolHandler:
             )
             if result.timed_out:
                 return {"status": "failed", "reason": "timeout"}
-            if (result.started or result.exit_code == 0) and self._mutates_desktop(
-                decision.argv
-            ):
+            dispatch_rejected = (
+                decision.argv[:2] == ("hyprctl", "dispatch")
+                and result.exit_code == 0
+                and result.stdout.strip() not in ("", "ok")
+            )
+            succeeded = (
+                result.started or result.exit_code == 0
+            ) and not dispatch_rejected
+            if succeeded and self._mutates_desktop(decision.argv):
                 self._schedule_state_refresh()
             if result.started:
                 if self.event_sink is not None:
@@ -352,7 +376,7 @@ class RunToolHandler:
                     {"event": "ran", "command": command, "exit": result.exit_code}
                 )
             return {
-                "status": "ok" if result.exit_code == 0 else "failed",
+                "status": "ok" if succeeded else "failed",
                 "exit_code": result.exit_code,
                 "stdout": stdout[:stdout_limit],
                 "stderr": result.stderr[:200],

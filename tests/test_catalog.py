@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from omarvis.catalog import (
     HYPR_DISPATCHERS,
     CommandOutput,
@@ -14,6 +16,7 @@ from omarvis.catalog import (
     hyprland_prompt,
     load_catalog,
     load_herdr_catalog,
+    translate_dispatch,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -104,6 +107,71 @@ def test_hyprland_prompt_advertises_read_only_state_queries():
     assert "hyprctl clients -j" in prompt
     assert "hyprctl activewindow -j" in prompt
     assert "hyprctl activeworkspace -j" in prompt
+
+
+@pytest.mark.parametrize(
+    "legacy, lua",
+    [
+        ("workspace 2", 'hl.dsp.focus({ workspace = "2" })'),
+        ("workspace +1", 'hl.dsp.focus({ workspace = "+1" })'),
+        ("movetoworkspace 3", 'hl.dsp.window.move({ workspace = "3" })'),
+        ("focuswindow class:chromium", 'hl.dsp.focus({ window = "class:chromium" })'),
+        ("killactive", "hl.dsp.window.close()"),
+        (
+            "closewindow class:chromium",
+            'hl.dsp.window.close({ window = "class:chromium" })',
+        ),
+        ("fullscreen", 'hl.dsp.window.fullscreen({ action = "toggle" })'),
+        ("fullscreen 0", 'hl.dsp.window.fullscreen({ action = "toggle" })'),
+        (
+            "fullscreen 1",
+            'hl.dsp.window.fullscreen({ mode = "maximized", action = "toggle" })',
+        ),
+        ("togglefloating", 'hl.dsp.window.float({ action = "toggle" })'),
+        ("movefocus l", 'hl.dsp.focus({ direction = "left" })'),
+        ("movefocus d", 'hl.dsp.focus({ direction = "down" })'),
+        ("swapwindow r", 'hl.dsp.window.swap({ direction = "right" })'),
+        ("togglesplit", 'hl.dsp.layout("togglesplit")'),
+        ("centerwindow", "hl.dsp.window.center()"),
+        ("pin", 'hl.dsp.window.pin({ action = "toggle" })'),
+        ("togglegroup", "hl.dsp.group.toggle()"),
+        ("changegroupactive f", "hl.dsp.group.next()"),
+        ("changegroupactive b", "hl.dsp.group.prev()"),
+        ("cyclenext", "hl.dsp.window.cycle_next()"),
+        ("focusmonitor +1", 'hl.dsp.focus({ monitor = "+" })'),
+        ("exit", "hl.dsp.exit()"),
+    ],
+)
+def test_legacy_dispatchers_translate_to_lua_expressions(legacy, lua):
+    argv = ("hyprctl", "dispatch", *legacy.split())
+
+    assert translate_dispatch(argv) == ("hyprctl", "dispatch", lua)
+
+
+def test_dispatch_translation_escapes_lua_string_arguments():
+    argv = ("hyprctl", "dispatch", "closewindow", 'class:a"b\\c')
+
+    assert translate_dispatch(argv) == (
+        "hyprctl",
+        "dispatch",
+        'hl.dsp.window.close({ window = "class:a\\"b\\\\c" })',
+    )
+
+
+def test_non_dispatch_commands_pass_through_translation_unchanged():
+    argv = ("hyprctl", "clients", "-j")
+
+    assert translate_dispatch(argv) == argv
+
+
+def test_current_state_advertises_the_spaced_terminal_herdr_route():
+    def runner(argv, timeout):
+        return CommandOutput(1, "", "unavailable")
+
+    state = current_state(runner=runner)
+
+    assert "omarchy launch terminal herdr" in state
+    assert "terminal-herdr" not in state
 
 
 def test_hypr_clients_are_compacted_with_their_workspace():
