@@ -231,12 +231,7 @@ def current_state(
         f"Theme: {theme}",
         "Windows:",
     ]
-    if isinstance(clients, list):
-        for client in clients[:20]:
-            if isinstance(client, Mapping):
-                lines.append(
-                    f"- {client.get('class', 'unknown')} — {client.get('title', '')}".rstrip()
-                )
+    lines.extend(f"- {line}" for line in compact_hypr_clients(clients))
     if len(lines) == 4:
         lines.append("- unknown")
     workspace_payload = _run_json(runner, ("herdr", "workspace", "list"))
@@ -317,9 +312,10 @@ HERDR_GROUPS = (
 
 HYPR_DISPATCHER_DOCS = {
     "workspace": "workspace <n|+1|-1>",
-    "movetoworkspace": "movetoworkspace <n>",
+    "movetoworkspace": "movetoworkspace <n> (moves the focused window; focus the target first)",
     "focuswindow": "focuswindow class:<class>",
     "killactive": "killactive",
+    "closewindow": "closewindow class:<class>",
     "fullscreen": "fullscreen [0|1]",
     "togglefloating": "togglefloating",
     "movefocus": "movefocus l|r|u|d",
@@ -334,6 +330,51 @@ HYPR_DISPATCHER_DOCS = {
     "exit": "exit (requires confirmation)",
 }
 HYPR_DISPATCHERS = frozenset(HYPR_DISPATCHER_DOCS)
+
+HYPR_READ_COMMANDS = frozenset(
+    {
+        ("hyprctl", "clients", "-j"),
+        ("hyprctl", "activewindow", "-j"),
+        ("hyprctl", "activeworkspace", "-j"),
+    }
+)
+
+
+def compact_hypr_clients(payload: Any, *, limit: int = 20) -> list[str]:
+    if not isinstance(payload, list):
+        return []
+    lines: list[str] = []
+    for client in payload[:limit]:
+        if not isinstance(client, Mapping):
+            continue
+        workspace = client.get("workspace")
+        workspace_id = (
+            workspace.get("id", "?") if isinstance(workspace, Mapping) else "?"
+        )
+        lines.append(
+            f"{client.get('class', 'unknown')} — {client.get('title', '')} (ws {workspace_id})"
+        )
+    return lines
+
+
+def desktop_state(
+    *,
+    runner: Callable[[Sequence[str], float], CommandOutput] = _default_runner,
+) -> str:
+    active_workspace = _run_json(runner, ("hyprctl", "activeworkspace", "-j"))
+    active_window = _run_json(runner, ("hyprctl", "activewindow", "-j"))
+    clients = _run_json(runner, ("hyprctl", "clients", "-j"))
+    workspace_id = (
+        active_workspace.get("id", "unknown")
+        if isinstance(active_workspace, Mapping)
+        else "unknown"
+    )
+    if isinstance(active_window, Mapping):
+        focused = f"{active_window.get('class', 'unknown')} — {active_window.get('title', '')}".rstrip()
+    else:
+        focused = "unknown"
+    windows = ", ".join(compact_hypr_clients(clients)) or "none"
+    return f"Desktop: workspace {workspace_id}; focused {focused}; windows: {windows}"
 
 
 def _empty_catalog() -> Catalog:
@@ -384,9 +425,15 @@ def load_herdr_catalog(
 
 
 def hyprland_prompt() -> str:
-    return "\n".join(
-        f"hyprctl dispatch {usage}" for usage in HYPR_DISPATCHER_DOCS.values()
+    lines = [f"hyprctl dispatch {usage}" for usage in HYPR_DISPATCHER_DOCS.values()]
+    lines.extend(
+        (
+            "hyprctl clients -j — List windows with class, title, and workspace",
+            "hyprctl activewindow -j — Show the focused window",
+            "hyprctl activeworkspace -j — Show the active workspace",
+        )
     )
+    return "\n".join(lines)
 
 
 def catalog_variables(

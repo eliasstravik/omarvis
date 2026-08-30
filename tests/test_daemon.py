@@ -1,5 +1,8 @@
 import json
+import time
 from pathlib import Path
+
+import pytest
 
 from omarvis.catalog import catalog_from_data
 from omarvis.daemon import ExecutionResult, RunToolHandler, compact_browser_tabs
@@ -202,6 +205,90 @@ def test_herdr_json_results_are_compacted_before_returning_to_the_agent():
         "w58:p6 claude blocked cwd=~/dev/omarvis"
     )
     assert len(result["stdout"]) <= 600
+
+
+def _wait_for(predicate, timeout=2.0):
+    deadline = time.time() + timeout
+    while not predicate() and time.time() < deadline:
+        time.sleep(0.01)
+    return predicate()
+
+
+@pytest.mark.parametrize(
+    "command, result",
+    [
+        ("hyprctl dispatch workspace 2", ExecutionResult(0, "", "")),
+        ("omarchy launch browser", ExecutionResult(None, started=True)),
+    ],
+)
+def test_desktop_mutations_push_a_state_refresh_to_conversation_context(
+    command, result
+):
+    updates = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        return result
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers={"workspace"},
+        config={},
+        executor=executor,
+        confirmation_wait=0,
+        context_sink=updates.append,
+        state_provider=lambda: "Desktop: fresh",
+        state_refresh_delay=0.0,
+    )
+
+    assert handler.handle({"command": command})["status"] in {"ok", "started"}
+    assert _wait_for(lambda: updates)
+    assert updates == ["Desktop: fresh"]
+
+
+def test_read_only_commands_do_not_trigger_a_state_refresh():
+    updates = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        stdout = '{"result":{"agents":[]}}' if argv[0] == "herdr" else "[]"
+        return ExecutionResult(0, stdout, "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        executor=executor,
+        confirmation_wait=0,
+        context_sink=updates.append,
+        state_provider=lambda: "Desktop: fresh",
+        state_refresh_delay=0.0,
+    )
+
+    assert handler.handle({"command": "hyprctl clients -j"})["status"] == "ok"
+    assert handler.handle({"command": "herdr agent list"})["status"] == "ok"
+    assert not _wait_for(lambda: updates, timeout=0.1)
+
+
+def test_hyprctl_clients_results_are_compacted_before_returning_to_the_agent():
+    payload = (
+        '[{"class":"firefox","title":"GitHub","workspace":{"id":3}},'
+        '{"class":"foot","title":"tests","workspace":{"id":1}}]'
+    )
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        return ExecutionResult(0, payload, "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+    result = handler.handle({"command": "hyprctl clients -j"})
+
+    assert result["status"] == "ok"
+    assert result["stdout"] == "firefox — GitHub (ws 3)\nfoot — tests (ws 1)"
 
 
 def test_client_tool_result_is_serialized_for_the_elevenlabs_protocol():
