@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -163,6 +164,9 @@ class DictationService:
         event_sink: Callable[[Mapping[str, Any]], None] | None = None,
         earcons_enabled: bool = False,
         sound_player: Callable[..., None] = play_sound,
+        tap_discard_seconds: float = 1.0,
+        max_recording_seconds: float = 90.0,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.recorder = recorder
         self.transcriber = transcriber
@@ -171,7 +175,25 @@ class DictationService:
         self.event_sink = event_sink
         self.earcons_enabled = earcons_enabled
         self.sound_player = sound_player
+        # A stop arriving within tap_discard_seconds of start is a tap on
+        # the push-to-talk key, not a release after speech: discard the
+        # recording quietly instead of transcribing a fraction of a second
+        # of silence (hands-free is entered only via the Space chord). The
+        # window is measured daemon-side, and each of start/stop rides a
+        # separate keybind → omarchy-shell spawn → IPC → stdin hop, so it
+        # must absorb that round-trip jitter on top of the physical tap —
+        # hence a full second rather than a keyboard-repeat-scale
+        # threshold. Deliberate push-to-talk holds are speech-length
+        # (several seconds), so the wider window doesn't misread them.
+        # max_recording_seconds caps a hands-free session so a forgotten
+        # lock can't leave the microphone open indefinitely.
+        self.tap_discard_seconds = tap_discard_seconds
+        self.max_recording_seconds = max_recording_seconds
+        self.clock = clock
         self.state = "idle"
+        self.locked = False
+        self._recording_started_at: float | None = None
+        self._cap_timer: threading.Timer | None = None
         self._lock = threading.Lock()
         self._worker: threading.Thread | None = None
 
@@ -196,9 +218,24 @@ class DictationService:
                 self._play("error")
                 self._emit("idle")
                 return "error"
+            self.locked = False
+            self._recording_started_at = self.clock()
+            self._start_cap_timer()
             self._play("mic-open")
             self._emit("recording")
             return "recording"
+
+    def _start_cap_timer(self) -> None:
+        if self.max_recording_seconds <= 0:
+            return
+        self._cap_timer = threading.Timer(self.max_recording_seconds, self.stop)
+        self._cap_timer.daemon = True
+        self._cap_timer.start()
+
+    def _cancel_cap_timer(self) -> None:
+        if self._cap_timer is not None:
+            self._cap_timer.cancel()
+            self._cap_timer = None
 
     def _recording_level(self, level: float) -> None:
         if self.state == "recording":
@@ -208,6 +245,14 @@ class DictationService:
         with self._lock:
             if self.state != "recording":
                 return "not-recording"
+            if (
+                not self.locked
+                and self._recording_started_at is not None
+                and self.clock() - self._recording_started_at < self.tap_discard_seconds
+            ):
+                return self._discard_locked()
+            self._cancel_cap_timer()
+            self.locked = False
             try:
                 audio = self.recorder.stop()
             except Exception as error:
@@ -222,6 +267,38 @@ class DictationService:
             )
             self._worker.start()
             return "transcribing"
+
+    def handsfree(self) -> str:
+        """Lock the current recording open (Wispr-style Super+J+Space chord)."""
+        with self._lock:
+            if self.state != "recording":
+                return "not-recording"
+            if not self.locked:
+                self.locked = True
+                self._emit("recording", locked=True)
+            return "locked"
+
+    def cancel(self) -> str:
+        """Discard the current recording without transcribing or typing."""
+        with self._lock:
+            if self.state != "recording":
+                return "not-recording"
+            return self._discard_locked()
+
+    def _discard_locked(self) -> str:
+        """Close the mic and drop the audio. Caller must hold self._lock."""
+        self._cancel_cap_timer()
+        self.locked = False
+        try:
+            self.recorder.stop()
+        except Exception as error:
+            self._emit("error", message=str(error))
+            self._play("error")
+            self._emit("idle")
+            return "error"
+        self._play("mic-close")
+        self._emit("idle", canceled=True)
+        return "canceled"
 
     def _finish(self, audio: bytes) -> None:
         try:
@@ -248,6 +325,7 @@ class DictationService:
 
     def close(self) -> None:
         with self._lock:
+            self._cancel_cap_timer()
             if self.state == "recording":
                 self.recorder.stop()
                 self._play("mic-close")
@@ -277,6 +355,8 @@ def main(_argv: Sequence[str] | None = None) -> int:
         cleanup=bool(dictation.get("cleanup", True)),
         event_sink=emit_event,
         earcons_enabled=earcons_enabled(config),
+        tap_discard_seconds=float(dictation.get("tap_discard_ms", 1000)) / 1000.0,
+        max_recording_seconds=float(dictation.get("max_recording_seconds", 90)),
     )
 
     def terminate(_signum: int, _frame: Any) -> None:
@@ -293,6 +373,10 @@ def main(_argv: Sequence[str] | None = None) -> int:
             service.start()
         elif command == "stop":
             service.stop()
+        elif command == "handsfree":
+            service.handsfree()
+        elif command == "cancel":
+            service.cancel()
         elif command in {"quit", "exit"}:
             service.close()
             break
