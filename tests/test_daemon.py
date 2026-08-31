@@ -200,6 +200,55 @@ def test_browser_tab_ownership_rewrites_only_navigation_until_omarvis_owns_the_t
     assert any(call[-2:] == ("click", "@e1") for call in click_calls)
 
 
+def test_desktop_browser_launch_is_routed_into_the_managed_browser_session():
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append(tuple(argv))
+        return ExecutionResult(0, "[]", "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={
+            "agent_browser_path": "/opt/agent-browser",
+            "browser_mode": "real-profile",
+        },
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+    assert handler.handle({"command": "omarchy launch browser"})["status"] == "ok"
+    assert (
+        handler.handle({"command": "agent-browser open https://google.com"})[
+            "status"
+        ]
+        == "ok"
+    )
+
+    assert calls[0][-2:] == ("tab", "new")
+    assert calls[1][-2:] == ("open", "https://google.com")
+
+
+def test_desktop_browser_launch_is_unchanged_without_browser_automation():
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append(tuple(argv))
+        return ExecutionResult(None, started=True)
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={"browser_mode": "unavailable"},
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+    assert handler.handle({"command": "omarchy launch browser"})["status"] == "started"
+    assert calls == [("omarchy", "launch", "browser")]
+
+
 def test_browser_probe_timeout_waits_for_chromium_approval_without_fallback():
     calls = []
 

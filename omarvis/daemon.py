@@ -443,7 +443,12 @@ class RunToolHandler:
                 return self._handle_screenshot(
                     str(parameters.get("tool_call_id") or "")
                 )
-            execution_argv = decision.argv
+            effective_argv = decision.argv
+            if decision.argv == ("omarchy", "launch", "browser") and str(
+                self.config.get("browser_mode", "unavailable")
+            ) != "unavailable":
+                effective_argv = ("agent-browser", "tab", "new")
+            execution_argv = effective_argv
             timeout = 3.0
             kill_on_timeout = False
             stdout_limit = 400
@@ -458,15 +463,15 @@ class RunToolHandler:
                 self._hyprland_speaks_lua()
             ):
                 execution_argv = translate_dispatch(decision.argv)
-            if decision.argv[:1] == ("agent-browser",):
-                prepared, error = self._prepare_browser(decision.argv)
+            if effective_argv[:1] == ("agent-browser",):
+                prepared, error = self._prepare_browser(effective_argv)
                 if error is not None:
                     return error
                 assert prepared is not None
                 execution_argv = prepared
                 timeout = 30.0
                 kill_on_timeout = True
-                stdout_limit = 6000 if decision.argv[1:2] == ("snapshot",) else 3000
+                stdout_limit = 6000 if effective_argv[1:2] == ("snapshot",) else 3000
                 execution_stdout_limit = stdout_limit
             result = self.executor(
                 execution_argv,
@@ -494,12 +499,12 @@ class RunToolHandler:
                     self._set_category_offer(decision.argv, confirmed_category)
                 )
                 return response
-            if result.exit_code == 0 and decision.argv[:1] == ("agent-browser",):
+            if result.exit_code == 0 and effective_argv[:1] == ("agent-browser",):
                 if (
-                    decision.argv[1:2] == ("open",) and not self._browser_tab_owned
-                ) or decision.argv[1:3] == ("tab", "new"):
+                    effective_argv[1:2] == ("open",) and not self._browser_tab_owned
+                ) or effective_argv[1:3] == ("tab", "new"):
                     self._browser_tab_owned = True
-                elif decision.argv[1:2] == ("tab",) and decision.argv[2:3] not in {
+                elif effective_argv[1:2] == ("tab",) and effective_argv[2:3] not in {
                     ("list",),
                     ("new",),
                 }:

@@ -70,6 +70,8 @@ When a contextual update reports a Herdr state change, mention it briefly at the
 
 Check the browser mode in current state before using browser commands. In `own-browser` mode you drive the user's running Chromium. In `real-profile` mode a separate browser window opens with a snapshot of the user's profile: their logins work there, but changes are not written back to their real profile — say so if asked. In `omarvis-browser` mode the window uses a separate profile with its own logins. The first navigation uses `agent-browser tab new <url>` so Omarvis gets its own tab. Later navigation in that tab uses `agent-browser open <url>`. The daemon also enforces this ownership rule.
 
+Treat every request to open, launch, navigate, search, or interact with a browser as one continuous `agent-browser` workflow. Never run `omarchy launch browser` for browser intent. To open a browser without a destination, run `agent-browser tab new`; subsequent requests reuse that Omarvis-owned tab unless the user explicitly asks for a new tab or switches tabs.
+
 Switch tabs with `agent-browser tab t2`, never `tab switch`. After switching, take a new snapshot before using element refs. For "click <thing>", try `agent-browser find text "<thing>" click` once. If it fails, run `agent-browser snapshot`, then click the matching `@eN`. To search, snapshot the page, fill the search box, and press Enter. Read `agent-browser get title` after navigation.
 
 Never use `eval`, global browser flags, or paths with `screenshot`. If a browser call returns `browser-pending-approval`, say "Click Allow in Chromium, then ask me again." If attachment is rejected, tell the user to enable `chrome://inspect/#remote-debugging`.
