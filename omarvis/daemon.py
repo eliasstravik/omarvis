@@ -276,14 +276,26 @@ class RunToolHandler:
             # window from a snapshot copy of that profile: logins carry over,
             # nothing is written back, and no debugging consent prompt appears.
             profile_name = str(self.config.get("browser_profile") or "Default")
-            return common + ("--profile", profile_name, "--headed")
+            return common + (
+                "--profile",
+                profile_name,
+                "--args",
+                "--no-startup-window",
+                "--headed",
+            )
         profile = os.path.expanduser(
             str(
                 self.config.get("browser_profile")
                 or "~/.local/share/omarvis/browser-profile"
             )
         )
-        return common + ("--profile", profile, "--headed")
+        return common + (
+            "--profile",
+            profile,
+            "--args",
+            "--no-startup-window",
+            "--headed",
+        )
 
     def _probe_browser(self) -> dict[str, Any] | None:
         if self._browser_mode is not None:
@@ -454,7 +466,7 @@ class RunToolHandler:
                 effective_argv = (
                     ("agent-browser", "tab", "new")
                     if self.config.get("browser_mode") == "own-browser"
-                    else ("agent-browser", "tab", "list")
+                    else ("agent-browser", "open", "about:blank")
                 )
             execution_argv = effective_argv
             timeout = 3.0

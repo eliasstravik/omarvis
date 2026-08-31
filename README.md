@@ -44,7 +44,7 @@ Omarvis can use documented, non-hidden `omarchy` routes and a curated set of Hyp
 
 Herdr support includes reading agent and workspace state, focusing agents and panes, submitting prompts, splitting and moving panes, sending plain keys, and showing notifications. Running arbitrary terminal commands, sending control-key combinations, or closing Herdr resources requires confirmation.
 
-Browser support includes navigation, tab management, snapshots, clicking, filling fields, keyboard input, page titles, screenshots, downloads, and uploads. In `own-browser` mode Omarvis opens its own tab for the first navigation. In its isolated browser modes, it reuses the active managed tab and creates another only when you explicitly ask. It only changes to one of your other tabs when you ask it to switch.
+Browser support includes navigation, tab management, snapshots, clicking, filling fields, keyboard input, page titles, screenshots, downloads, and uploads. In `own-browser` mode Omarvis opens its own tab for the first navigation. Its isolated browser modes suppress Chromium's automatic startup tab, open one controlled tab, and create another only when you explicitly ask. It only changes to one of your other tabs when you ask it to switch.
 
 Ask mode is enforced in Python policy: dispatchers, navigation, clicks, launches, and every other mutation are refused even if the model requests one. `omarvis see` is intercepted in-process, captures the current desktop, uploads it into the active ElevenLabs conversation, and follows the tool result with a native multimodal image turn. The old local OCR route is policy-blocked.
 

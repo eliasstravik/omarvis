@@ -226,7 +226,7 @@ def test_desktop_browser_launch_is_routed_into_the_managed_browser_session():
         == "ok"
     )
 
-    assert calls[0][-2:] == ("tab", "list")
+    assert calls[0][-2:] == ("open", "about:blank")
     assert calls[1][-2:] == ("open", "https://google.com")
 
 
@@ -341,6 +341,8 @@ def test_real_profile_mode_launches_a_headed_snapshot_without_probing():
             "0",
             "--profile",
             "Default",
+            "--args",
+            "--no-startup-window",
             "--headed",
             "tab",
             "list",
@@ -368,7 +370,8 @@ def test_real_profile_mode_uses_the_configured_profile_name():
     )
 
     assert handler.handle({"command": "agent-browser tab list"})["status"] == "ok"
-    assert ("--profile", "Work", "--headed") == calls[0][6:9]
+    assert ("--profile", "Work", "--args", "--no-startup-window") == calls[0][6:10]
+    assert "--headed" in calls[0]
 
 
 def test_browser_tab_context_is_compact_and_omits_target_ids():
