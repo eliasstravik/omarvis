@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell
 import Quickshell.Io
 
 Item {
@@ -13,8 +14,18 @@ Item {
   property string pendingMode: ""
   property string dictationState: "idle"
   property string lastDictation: ""
+  property real inLevel: 0.0
+  property real outLevel: 0.0
+  property string streamingAgent: ""
+  property string runningCommand: ""
+  property real dictationLevel: 0.0
+  property string hudPosition: "top-center"
+  property var daemonCommand: []
+  property bool dictationDaemonEnabled: true
   property bool stopRequested: false
   readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/$/, "")
+  property alias hud: hudWindow
+  signal commandRan(string command)
 
   function handleEvent(line) {
     var event
@@ -25,11 +36,34 @@ Item {
       return
     }
     if (event.event === "state") {
+      if (String(event.state || "idle") !== root.sessionState && event.state !== "error")
+        root.lastError = ""
       root.sessionState = String(event.state || "idle")
       if (event.mode) root.currentMode = root.normalizeMode(event.mode)
     }
-    else if (event.event === "user") root.lastUser = String(event.text || "")
-    else if (event.event === "agent") root.lastAgent = String(event.text || "")
+    else if (event.event === "level") {
+      root.inLevel = Math.max(0, Math.min(1, Number(event.in || 0)))
+      root.outLevel = Math.max(0, Math.min(1, Number(event.out || 0)))
+    }
+    else if (event.event === "user") {
+      root.lastUser = String(event.text || "")
+      root.streamingAgent = ""
+    }
+    else if (event.event === "agent_part")
+      root.streamingAgent += String(event.text || "")
+    else if (event.event === "agent") {
+      root.lastAgent = String(event.text || "")
+      root.streamingAgent = ""
+    }
+    else if (event.event === "running")
+      root.runningCommand = String(event.command || "")
+    else if (event.event === "ran") {
+      root.runningCommand = ""
+      root.commandRan(String(event.command || ""))
+    }
+    else if (event.event === "dictation") {
+      root.applyDictationEvent(event)
+    }
     else if (event.event === "error") {
       root.lastError = String(event.message || "Unknown error")
       root.sessionState = "error"
@@ -45,9 +79,27 @@ Item {
       return
     }
     if (event.event !== "dictation") return
-    root.dictationState = String(event.state || "idle")
+    root.applyDictationEvent(event)
+  }
+
+  function applyDictationEvent(event) {
+    var nextState = String(event.state || "idle")
+    if (nextState !== root.dictationState && nextState !== "error") root.lastError = ""
+    root.dictationState = nextState
+    if (event.level !== undefined) root.dictationLevel = Math.max(0, Math.min(1, Number(event.level || 0)))
+    else if (nextState !== "recording") root.dictationLevel = 0.0
     if (event.text) root.lastDictation = String(event.text)
     if (event.message) root.lastError = String(event.message)
+  }
+
+  function loadUiConfig(raw) {
+    try {
+      var config = JSON.parse(String(raw || "{}"))
+      var position = config.ui ? String(config.ui.hud_position || "top-center") : "top-center"
+      root.hudPosition = position === "top-right" ? "top-right" : "top-center"
+    } catch (error) {
+      root.hudPosition = "top-center"
+    }
   }
 
   function normalizeMode(mode): string {
@@ -99,7 +151,9 @@ Item {
 
   Process {
     id: daemon
-    command: [root.pluginDir + "/bin/omarvis-run", "--mode", root.currentMode]
+    command: root.daemonCommand.length > 0
+      ? root.daemonCommand
+      : [root.pluginDir + "/bin/omarvis-run", "--mode", root.currentMode]
     stdout: SplitParser {
       onRead: data => root.handleEvent(String(data))
     }
@@ -111,6 +165,10 @@ Item {
       var expectedStop = root.stopRequested
       root.stopRequested = false
       root.sessionState = expectedStop || exitCode === 0 ? "idle" : "error"
+      root.inLevel = 0.0
+      root.outLevel = 0.0
+      root.streamingAgent = ""
+      root.runningCommand = ""
       if (!expectedStop && exitCode !== 0 && !root.lastError)
         root.lastError = "Daemon exited with code " + exitCode
       if (root.pendingMode) {
@@ -124,7 +182,7 @@ Item {
   Process {
     id: dictationDaemon
     command: [root.pluginDir + "/bin/omarvis-dictate"]
-    running: true
+    running: root.dictationDaemonEnabled
     stdinEnabled: true
     stdout: SplitParser {
       onRead: data => root.handleDictationEvent(String(data))
@@ -134,8 +192,9 @@ Item {
     }
     onExited: function(exitCode, exitStatus) {
       root.dictationState = "idle"
+      root.dictationLevel = 0.0
       if (exitCode !== 0) root.lastError = "Dictation daemon exited with code " + exitCode
-      dictationRestart.restart()
+      if (root.dictationDaemonEnabled) dictationRestart.restart()
     }
   }
 
@@ -143,7 +202,28 @@ Item {
     id: dictationRestart
     interval: 2000
     repeat: false
-    onTriggered: if (!dictationDaemon.running) dictationDaemon.running = true
+    onTriggered: if (root.dictationDaemonEnabled && !dictationDaemon.running) dictationDaemon.running = true
+  }
+
+  FileView {
+    id: uiConfig
+    path: Quickshell.env("HOME") + "/.config/omarchy/omarvis/config.json"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.loadUiConfig(text())
+    onLoadFailed: root.loadUiConfig("{}")
+    onFileChanged: reload()
+  }
+
+  HudWindow {
+    id: hudWindow
+    service: root
+    shell: root.shell
+    hudPosition: root.hudPosition
+    foregroundColor: root.shell && root.shell.bar ? root.shell.bar.foreground : "#f2f4f5"
+    backgroundColor: root.shell && root.shell.bar ? root.shell.bar.background : "#e6101315"
+    accentColor: root.shell && root.shell.bar ? root.shell.bar.foreground : "#7dcfff"
+    urgentColor: root.shell && root.shell.bar ? root.shell.bar.urgent : "#ff6b6b"
   }
 
   Timer {
@@ -174,6 +254,11 @@ Item {
         currentMode: root.currentMode,
         dictationState: root.dictationState,
         lastDictation: root.lastDictation,
+        inLevel: root.inLevel,
+        outLevel: root.outLevel,
+        streamingAgent: root.streamingAgent,
+        runningCommand: root.runningCommand,
+        dictationLevel: root.dictationLevel,
         running: daemon.running
       })
     }

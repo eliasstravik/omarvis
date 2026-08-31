@@ -32,3 +32,11 @@ def test_setup_defaults_both_agents_to_the_omarvis_voice():
     script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
 
     assert 'voice_id: (.voice_id // "JSWO6cw2AyFE324d5kEr")' in script
+
+
+def test_setup_pins_metered_audio_sdk_and_preserves_ui_defaults():
+    script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
+
+    assert '"elevenlabs==2.65.0"' in script
+    assert "earcons: (.ui.earcons // true)" in script
+    assert 'hud_position: (.ui.hud_position // "top-center")' in script

@@ -38,6 +38,23 @@ o.bind("SUPER + ALT + J", "Omarvis Text", "<plugin-dir>/bin/omarvis-text")
 
 `SUPER + CTRL + J` starts the full Agent scope. `SUPER + SHIFT + J` starts the strictly read-only Ask scope. Hold `SUPER + J` to dictate your own words into the focused window, or use `SUPER + ALT + J` for a typed one-shot Agent instruction. Clicking the bar microphone toggles Agent mode.
 
+## Session HUD
+
+While a voice session or dictation is active, Omarvis shows a passive pill at the top of the screen. The left dot follows microphone level, the right dot animates while the agent thinks and follows playback level while it speaks, and validated tool execution gets a separate spinner/check indicator. The HUD disappears when both session and dictation are idle; errors remain visible until the next state change. Short earcons mark microphone open, microphone close, and failures.
+
+The defaults can be overridden in `~/.config/omarchy/omarvis/config.json`:
+
+```json
+{
+  "ui": {
+    "earcons": true,
+    "hud_position": "top-center"
+  }
+}
+```
+
+`hud_position` accepts `top-center` or `top-right`. Set `earcons` to `false` to silence all three cues. For development, `bin/omarvis-run --simulate` emits the complete HUD event timeline without an API key, audio hardware, network access, or ElevenLabs usage.
+
 ## What it can do
 
 Omarvis can use documented, non-hidden `omarchy` routes and a curated set of Hyprland dispatchers. Common examples include switching workspaces, launching or focusing apps, closing the focused window, changing themes, adjusting volume and brightness, taking screenshots, setting reminders, and locking the screen.

@@ -11,7 +11,6 @@ from omarvis.daemon import (
     ExecutionResult,
     RunToolHandler,
     compact_browser_tabs,
-    initial_session_notification,
     send_tool_result_then_screenshot,
     wait_for_conversation_connection,
 )
@@ -19,13 +18,9 @@ from omarvis.daemon import (
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def test_text_only_notification_does_not_claim_to_be_listening():
-    assert initial_session_notification(False) == "Listening"
-    assert initial_session_notification(True) == "Processing text command"
-
-
 def test_text_only_session_ends_after_its_agent_response(monkeypatch):
     conversations = []
+    events = []
 
     class FakeConversation:
         def __init__(self, **options):
@@ -48,13 +43,6 @@ def test_text_only_session_ends_after_its_agent_response(monkeypatch):
         def wait_for_session_end(self):
             pass
 
-    class FakeNotifier:
-        def start(self, _description):
-            pass
-
-        def update(self, _headline, _description):
-            pass
-
     monkeypatch.setattr("elevenlabs.ElevenLabs", lambda **_options: object())
     monkeypatch.setattr(
         "elevenlabs.conversational_ai.conversation.Conversation",
@@ -62,7 +50,7 @@ def test_text_only_session_ends_after_its_agent_response(monkeypatch):
     )
     monkeypatch.setattr("omarvis.catalog.catalog_variables", lambda **_options: {})
     monkeypatch.setattr("omarvis.catalog.load_catalog", omarchy_catalog)
-    monkeypatch.setattr(daemon, "Notifier", FakeNotifier)
+    monkeypatch.setattr(daemon, "emit_event", events.append)
 
     result = daemon.run_session(
         {
@@ -78,6 +66,89 @@ def test_text_only_session_ends_after_its_agent_response(monkeypatch):
     assert result == 0
     assert conversations[0].messages == ["open a terminal"]
     assert conversations[0].ended is True
+    assert {"event": "state", "state": "thinking", "mode": "agent"} in events
+    assert {"event": "agent_part", "text": "done", "type": "final"} in events
+
+
+def test_session_emits_thinking_streaming_parts_and_final_zero(monkeypatch):
+    events = []
+
+    class PartType:
+        value = "delta"
+
+    class FakeConversation:
+        def __init__(self, **options):
+            self.options = options
+            self._ws = object()
+
+        def start_session(self):
+            pass
+
+        def send_user_message(self, message):
+            self.options["callback_user_transcript"](message)
+            self.options["callback_agent_chat_response_part"]("hello ", PartType())
+            self.options["callback_agent_chat_response_part"]("there", PartType())
+            self.options["callback_agent_response"]("hello there")
+
+        def end_session(self):
+            pass
+
+        def wait_for_session_end(self):
+            pass
+
+    monkeypatch.setattr("elevenlabs.ElevenLabs", lambda **_options: object())
+    monkeypatch.setattr(
+        "elevenlabs.conversational_ai.conversation.Conversation",
+        FakeConversation,
+    )
+    monkeypatch.setattr("omarvis.catalog.catalog_variables", lambda **_options: {})
+    monkeypatch.setattr("omarvis.catalog.load_catalog", omarchy_catalog)
+    monkeypatch.setattr(daemon, "emit_event", events.append)
+
+    assert daemon.run_session(
+        {"agent_id": "agent", "ask_agent_id": "ask", "herdr_announcements": False},
+        "key",
+        text_only=True,
+        messages=["hi"],
+    ) == 0
+
+    thinking_index = events.index({"event": "state", "state": "thinking", "mode": "agent"})
+    speaking_index = events.index({"event": "state", "state": "speaking", "mode": "agent"})
+    first_part_index = events.index({"event": "agent_part", "text": "hello ", "type": "delta"})
+    assert thinking_index < speaking_index < first_part_index
+    assert [event for event in events if event.get("event") == "agent_part"] == [
+        {"event": "agent_part", "text": "hello ", "type": "delta"},
+        {"event": "agent_part", "text": "there", "type": "delta"},
+    ]
+    assert {"event": "level", "in": 0.0, "out": 0.0} in events
+    assert events[-1] == {"event": "state", "state": "idle", "mode": "agent"}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [ExecutionResult(0, "done", ""), ExecutionResult(None, started=True)],
+)
+def test_running_event_precedes_ran_with_same_command(result):
+    events = []
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        executor=lambda _argv, **_options: result,
+        event_sink=events.append,
+        confirmation_wait=0,
+    )
+
+    handler.handle({"command": "omarchy launch terminal"})
+
+    assert events[:2] == [
+        {"event": "running", "command": "omarchy launch terminal"},
+        {
+            "event": "ran",
+            "command": "omarchy launch terminal",
+            "exit": result.exit_code,
+        },
+    ]
 
 
 def omarchy_catalog():
@@ -874,6 +945,20 @@ def test_load_config_deep_merges_dictation_defaults(tmp_path):
         "cleanup": True,
         "model_id": "scribe_v2",
         "chunk_size": 500,
+    }
+
+
+def test_load_config_deep_merges_ui_defaults(tmp_path):
+    from omarvis.daemon import load_config
+
+    path = tmp_path / "config.json"
+    path.write_text('{"ui":{"earcons":false}}')
+
+    config = load_config(path)
+
+    assert config["ui"] == {
+        "earcons": False,
+        "hud_position": "top-center",
     }
 
 

@@ -9,7 +9,9 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from .daemon import load_api_key, load_config
+from .daemon import earcons_enabled, load_api_key, load_config
+from .levels import LevelThrottle, rms_level
+from .sounds import play as play_sound
 
 SAMPLE_RATE = 16_000
 CHANNELS = 1
@@ -47,12 +49,21 @@ def inject_text(
 
 
 class AudioRecorder:
-    def __init__(self, input_device_index: int | None = None) -> None:
+    def __init__(
+        self,
+        input_device_index: int | None = None,
+        level_sink: Callable[[float], None] | None = None,
+    ) -> None:
         self.input_device_index = input_device_index
+        self.level_sink = level_sink
         self._audio: Any = None
         self._stream: Any = None
         self._frames: list[bytes] = []
         self._lock = threading.Lock()
+        self._levels: LevelThrottle | None = None
+
+    def set_level_sink(self, sink: Callable[[float], None]) -> None:
+        self.level_sink = sink
 
     def start(self) -> None:
         if self._stream is not None:
@@ -64,6 +75,11 @@ class AudioRecorder:
 
         with self._lock:
             self._frames = []
+        self._levels = LevelThrottle(
+            lambda in_level, _out_level: self.level_sink(in_level)
+            if self.level_sink is not None
+            else None
+        )
         self._audio = pyaudio.PyAudio()
 
         def capture(
@@ -71,6 +87,8 @@ class AudioRecorder:
         ) -> tuple[None, int]:
             with self._lock:
                 self._frames.append(data)
+            if self._levels is not None:
+                self._levels.update_in(rms_level(data))
             return None, pyaudio.paContinue
 
         try:
@@ -105,50 +123,8 @@ class AudioRecorder:
         with self._lock:
             captured = b"".join(self._frames)
             self._frames = []
+        self._levels = None
         return captured
-
-
-class DictationNotifier:
-    def __init__(self, runner: Callable[..., Any] = subprocess.run) -> None:
-        self.runner = runner
-        self.notification_id = ""
-
-    def start(self) -> None:
-        try:
-            completed = self.runner(
-                [
-                    "omarchy-notification-send",
-                    "-p",
-                    "-g",
-                    chr(0xF130),
-                    "Omarvis",
-                    "● Dictating…",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-            if completed.returncode == 0:
-                self.notification_id = completed.stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            pass
-
-    def update(self, text: str) -> None:
-        command = ["omarchy-notification-send"]
-        if self.notification_id:
-            command.extend(("-r", self.notification_id))
-        command.extend(("Omarvis Dictation", text[:240]))
-        try:
-            self.runner(
-                command,
-                timeout=2,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except (OSError, subprocess.SubprocessError):
-            pass
 
 
 def scribe_transcriber(
@@ -184,15 +160,17 @@ class DictationService:
         transcriber: Callable[[bytes], str],
         injector: Callable[[str], None],
         cleanup: bool = True,
-        notifier: Any | None = None,
         event_sink: Callable[[Mapping[str, Any]], None] | None = None,
+        earcons_enabled: bool = False,
+        sound_player: Callable[..., None] = play_sound,
     ) -> None:
         self.recorder = recorder
         self.transcriber = transcriber
         self.injector = injector
         self.cleanup = cleanup
-        self.notifier = notifier or DictationNotifier()
         self.event_sink = event_sink
+        self.earcons_enabled = earcons_enabled
+        self.sound_player = sound_player
         self.state = "idle"
         self._lock = threading.Lock()
         self._worker: threading.Thread | None = None
@@ -202,19 +180,29 @@ class DictationService:
         if self.event_sink is not None:
             self.event_sink({"event": "dictation", "state": state, **extra})
 
+    def _play(self, name: str) -> None:
+        self.sound_player(name, enabled=self.earcons_enabled)
+
     def start(self) -> str:
         with self._lock:
             if self.state != "idle":
                 return f"already-{self.state}"
             try:
+                if hasattr(self.recorder, "set_level_sink"):
+                    self.recorder.set_level_sink(self._recording_level)
                 self.recorder.start()
             except Exception as error:
                 self._emit("error", message=str(error))
+                self._play("error")
                 self._emit("idle")
                 return "error"
-            self.notifier.start()
+            self._play("mic-open")
             self._emit("recording")
             return "recording"
+
+    def _recording_level(self, level: float) -> None:
+        if self.state == "recording":
+            self._emit("recording", level=round(float(level), 3))
 
     def stop(self) -> str:
         with self._lock:
@@ -223,10 +211,11 @@ class DictationService:
             try:
                 audio = self.recorder.stop()
             except Exception as error:
-                self.notifier.update(f"Dictation failed: {error}")
                 self._emit("error", message=str(error))
+                self._play("error")
                 self._emit("idle")
                 return "error"
+            self._play("mic-close")
             self._emit("transcribing")
             self._worker = threading.Thread(
                 target=self._finish, args=(audio,), daemon=True
@@ -244,13 +233,12 @@ class DictationService:
             if not transcript:
                 raise RuntimeError("No speech was detected")
             self.injector(transcript)
-            self.notifier.update(transcript)
             with self._lock:
                 self._emit("idle", text=transcript)
         except Exception as error:
-            self.notifier.update(f"Dictation failed: {error}")
             with self._lock:
                 self._emit("error", message=str(error))
+                self._play("error")
                 self._emit("idle")
 
     def wait(self, timeout: float = 10.0) -> None:
@@ -262,6 +250,7 @@ class DictationService:
         with self._lock:
             if self.state == "recording":
                 self.recorder.stop()
+                self._play("mic-close")
             self._emit("idle")
 
 
@@ -287,6 +276,7 @@ def main(_argv: Sequence[str] | None = None) -> int:
         injector=lambda text: inject_text(text, chunk_size=chunk_size),
         cleanup=bool(dictation.get("cleanup", True)),
         event_sink=emit_event,
+        earcons_enabled=earcons_enabled(config),
     )
 
     def terminate(_signum: int, _frame: Any) -> None:
