@@ -31,6 +31,8 @@ from .policy import (
     confirmation_category,
     decide,
 )
+from .levels import LevelThrottle, rms_level
+from .sounds import play as play_sound
 
 
 @dataclass(frozen=True)
@@ -493,6 +495,8 @@ class RunToolHandler:
                 kill_on_timeout = True
                 stdout_limit = 6000 if effective_argv[1:2] == ("snapshot",) else 3000
                 execution_stdout_limit = stdout_limit
+            if self.event_sink is not None:
+                self.event_sink({"event": "running", "command": command})
             result = self.executor(
                 execution_argv,
                 timeout=timeout,
@@ -598,6 +602,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "agent_browser_path": "agent-browser",
     "screenshot_cache_max_age_seconds": 86_400,
     "profile_path": "~/.config/omarchy/omarvis/profile.md",
+    "ui": {
+        "earcons": True,
+        "hud_position": "top-center",
+    },
     "dictation": {
         "language": "",
         "cleanup": True,
@@ -629,6 +637,12 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
                 **DEFAULT_CONFIG["dictation"],
                 **configured_dictation,
             }
+        configured_ui = loaded.get("ui", {})
+        if isinstance(configured_ui, Mapping):
+            config["ui"] = {
+                **DEFAULT_CONFIG["ui"],
+                **configured_ui,
+            }
     return config
 
 
@@ -637,6 +651,11 @@ def load_api_key(path: Path = API_KEY_PATH) -> str:
     if value:
         return value
     return path.read_text().strip() if path.exists() else ""
+
+
+def earcons_enabled(config: Mapping[str, Any]) -> bool:
+    ui = config.get("ui", {})
+    return bool(ui.get("earcons", True)) if isinstance(ui, Mapping) else True
 
 
 def sweep_screenshot_cache(
@@ -779,15 +798,16 @@ def watch_herdr(
         previous = current
 
 
-def _selected_audio_interface(input_device_index: int | None) -> Any:
+def _metered_audio_interface(
+    input_device_index: int | None, level_sink: LevelThrottle
+) -> Any:
     from elevenlabs.conversational_ai.default_audio_interface import (
         DefaultAudioInterface,
     )
 
-    if input_device_index is None:
-        return DefaultAudioInterface()
-
-    class SelectedAudioInterface(DefaultAudioInterface):
+    # Copied from elevenlabs 2.65.0's private DefaultAudioInterface loops.
+    # Keep this implementation and bin/omarvis-setup's exact SDK pin in sync.
+    class MeteredAudioInterface(DefaultAudioInterface):
         def start(self, input_callback: Callable[[bytes], None]) -> None:
             self.input_callback = input_callback
             self.output_queue = queue.Queue()
@@ -796,15 +816,19 @@ def _selected_audio_interface(input_device_index: int | None) -> Any:
                 target=self._output_thread, daemon=True
             )
             self.p = self.pyaudio.PyAudio()
+            input_options: dict[str, Any] = {
+                "format": self.pyaudio.paInt16,
+                "channels": 1,
+                "rate": 16000,
+                "input": True,
+                "stream_callback": self._in_callback,
+                "frames_per_buffer": self.INPUT_FRAMES_PER_BUFFER,
+                "start": True,
+            }
+            if input_device_index is not None:
+                input_options["input_device_index"] = input_device_index
             self.in_stream = self.p.open(
-                format=self.pyaudio.paInt16,
-                channels=1,
-                rate=16000,
-                input=True,
-                input_device_index=input_device_index,
-                stream_callback=self._in_callback,
-                frames_per_buffer=self.INPUT_FRAMES_PER_BUFFER,
-                start=True,
+                **input_options,
             )
             self.out_stream = self.p.open(
                 format=self.pyaudio.paInt16,
@@ -816,7 +840,22 @@ def _selected_audio_interface(input_device_index: int | None) -> Any:
             )
             self.output_thread.start()
 
-    return SelectedAudioInterface()
+        def _in_callback(
+            self, in_data: bytes, frame_count: int, time_info: Any, status: int
+        ) -> tuple[None, int]:
+            level_sink.update_in(rms_level(in_data))
+            return super()._in_callback(in_data, frame_count, time_info, status)
+
+        def _output_thread(self) -> None:
+            while not self.should_stop.is_set():
+                try:
+                    audio = self.output_queue.get(timeout=0.25)
+                    level_sink.update_out(rms_level(audio))
+                    self.out_stream.write(audio)
+                except queue.Empty:
+                    level_sink.update_out(0.0)
+
+    return MeteredAudioInterface()
 
 
 def list_devices() -> int:
@@ -920,6 +959,11 @@ def run_session(
     session_ended = threading.Event()
     contextual_updates: queue.Queue[str] = queue.Queue()
     notifier = Notifier()
+    levels = LevelThrottle(
+        lambda in_level, out_level: emit_event(
+            {"event": "level", "in": in_level, "out": out_level}
+        )
+    )
 
     def emit_state(state: str) -> None:
         emit_event({"event": "state", "state": state, "mode": mode})
@@ -991,14 +1035,34 @@ def run_session(
     client_tools = ScreenshotClientTools()
     client_tools.register("run", handler.handle_client_tool)
 
+    first_agent_delta = True
+
     def on_user(text: str) -> None:
+        nonlocal first_agent_delta
+        first_agent_delta = True
         handler.note_user_transcript(text)
-        emit_state("listening")
+        emit_state("thinking")
         emit_event({"event": "user", "text": text})
         notifier.update("You", text)
 
+    def on_agent_part(text: str, part_type: Any) -> None:
+        nonlocal first_agent_delta
+        if first_agent_delta:
+            first_agent_delta = False
+            emit_state("speaking")
+        emit_event(
+            {
+                "event": "agent_part",
+                "text": text,
+                "type": str(getattr(part_type, "value", part_type)),
+            }
+        )
+
     def on_agent(text: str) -> None:
-        emit_state("speaking")
+        if first_agent_delta:
+            on_agent_part(text, "final")
+        else:
+            emit_state("speaking")
         emit_event({"event": "agent", "text": text})
         notifier.update("Omarvis", text)
         if text_only:
@@ -1010,7 +1074,7 @@ def run_session(
     audio_interface = (
         None
         if text_only
-        else _selected_audio_interface(config.get("input_device_index"))
+        else _metered_audio_interface(config.get("input_device_index"), levels)
     )
     conversation = Conversation(
         client=client,
@@ -1021,6 +1085,7 @@ def run_session(
         client_tools=client_tools,
         callback_user_transcript=on_user,
         callback_agent_response=on_agent,
+        callback_agent_chat_response_part=on_agent_part,
         callback_end_session=on_end,
     )
     conversation_holder["conversation"] = conversation
@@ -1032,6 +1097,8 @@ def run_session(
     watcher = None
     try:
         wait_for_conversation_connection(conversation, stop_requested)
+        if not text_only:
+            play_sound("mic-open", enabled=earcons_enabled(config))
         if config.get("herdr_announcements", True) and not stop_requested.is_set():
             watcher = threading.Thread(
                 target=watch_herdr,
@@ -1041,6 +1108,7 @@ def run_session(
             watcher.start()
         emit_state("listening")
         for message in messages:
+            on_user(message)
             conversation.send_user_message(message)
         while not stop_requested.is_set() and not session_ended.is_set():
             try:
@@ -1057,6 +1125,9 @@ def run_session(
         teardown.join(5.0)
         if watcher is not None:
             watcher.join(5.0)
+        if not text_only:
+            play_sound("mic-close", enabled=earcons_enabled(config))
+        levels.force_zero()
         emit_state("idle")
         handler.clear_session_approvals()
     return 0
@@ -1065,12 +1136,23 @@ def run_session(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run one Omarvis voice session")
     parser.add_argument("--list-devices", action="store_true")
+    parser.add_argument("--simulate", action="store_true")
     parser.add_argument("--text-only", action="store_true")
     parser.add_argument("--message", action="append", default=[])
     parser.add_argument("--mode", choices=("agent", "ask"), default="agent")
     arguments = parser.parse_args(argv)
     if arguments.list_devices:
         return list_devices()
+    if arguments.simulate or os.environ.get("OMARVIS_SIMULATE") == "1":
+        from .simulate import run_simulation
+
+        run_simulation(
+            emit_event,
+            delay_scale=float(os.environ.get("OMARVIS_SIMULATE_DELAY_SCALE", "1")),
+            include_error=os.environ.get("OMARVIS_SIMULATE_ERROR") == "1",
+        )
+        return 0
+    config: Mapping[str, Any] = DEFAULT_CONFIG
     try:
         config = load_config()
         sweep_screenshot_cache(config)
@@ -1087,6 +1169,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "message": message,
                 }
             )
+            play_sound("error", enabled=earcons_enabled(config))
             return 2
         api_key = load_api_key()
         if not api_key:
@@ -1096,6 +1179,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "message": "ELEVENLABS_API_KEY is missing. Run bin/omarvis-setup.",
                 }
             )
+            play_sound("error", enabled=earcons_enabled(config))
             return 2
         return run_session(
             config,
@@ -1106,6 +1190,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except Exception as error:  # noqa: BLE001 - keep the CLI failure machine-readable
         emit_event({"event": "error", "message": str(error)})
+        play_sound("error", enabled=earcons_enabled(config))
         return 1
 
 

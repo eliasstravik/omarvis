@@ -10,17 +10,21 @@ BarWidget {
   readonly property string sessionState: svc ? svc.sessionState : "idle"
   readonly property string currentMode: svc ? svc.currentMode : "agent"
   readonly property string dictationState: svc ? svc.dictationState : "idle"
-  readonly property string displayState: dictationState !== "idle" ? dictationState : sessionState
+  readonly property string runningCommand: svc ? svc.runningCommand : ""
+  readonly property string displayState: runningCommand ? "running" : (dictationState !== "idle" ? dictationState : sessionState)
   readonly property string glyphText: {
+    if (sessionState === "error" || dictationState === "error") return String.fromCodePoint(0xF0026)
+    if (runningCommand) return String.fromCodePoint(0xF0493)
     if (dictationState === "recording") return String.fromCodePoint(0xF036C)
     if (dictationState === "transcribing") return String.fromCodePoint(0xF06D7)
-    if (currentMode === "ask" && sessionState !== "idle") return String.fromCodePoint(0xF02D6)
+    if (sessionState === "thinking") return String.fromCodePoint(0xF051F)
     if (sessionState === "speaking") return String.fromCodePoint(0xF057E)
+    if (currentMode === "ask" && sessionState !== "idle") return String.fromCodePoint(0xF02D6)
     if (sessionState === "idle") return String.fromCodePoint(0xF036D)
     return String.fromCodePoint(0xF036C)
   }
   readonly property color glyphColor: {
-    if (sessionState === "error") return bar.urgent
+    if (sessionState === "error" || dictationState === "error") return bar.urgent
     if (sessionState === "idle") return Qt.darker(bar.foreground, 1.5)
     return bar.foreground
   }

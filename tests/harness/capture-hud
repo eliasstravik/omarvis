@@ -1,0 +1,28 @@
+#!/bin/bash
+
+set -euo pipefail
+
+HARNESS_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+REPO_DIR=$(cd -- "$HARNESS_DIR/../.." && pwd)
+OUTPUT_DIR=${1:-"$REPO_DIR/scratchpad/voice-feedback-hud"}
+LOG_PATH="$OUTPUT_DIR/harness.log"
+
+mkdir -p "$OUTPUT_DIR"
+export QML_IMPORT_PATH="$(dirname -- "$REPO_DIR")${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
+export OMARVIS_SIMULATE=1
+export OMARVIS_SIMULATE_ERROR=1
+export OMARVIS_HUD_CAPTURE_DIR="$OUTPUT_DIR"
+
+quickshell --no-color -p "$HARNESS_DIR/HudHarness.qml" >"$LOG_PATH" 2>&1 &
+HARNESS_PID=$!
+
+cleanup() {
+  if kill -0 "$HARNESS_PID" 2>/dev/null; then
+    kill "$HARNESS_PID"
+    wait "$HARNESS_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+sleep 21.5
+grim "$OUTPUT_DIR/idle.png"

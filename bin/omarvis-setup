@@ -82,7 +82,7 @@ fi
 
 echo "Creating the Omarvis Python environment..."
 python -m venv --system-site-packages "$VENV_DIR"
-"$VENV_DIR/bin/pip" install "elevenlabs>=2,<3"
+"$VENV_DIR/bin/pip" install "elevenlabs==2.65.0"
 
 install -d -m 700 "$CONFIG_DIR"
 if [[ ! -s $KEY_PATH && -z ${ELEVENLABS_API_KEY:-} ]]; then
@@ -118,6 +118,10 @@ updated=$(jq \
       cleanup: (.dictation.cleanup // true),
       model_id: (.dictation.model_id // "scribe_v2"),
       chunk_size: (.dictation.chunk_size // 500)
+    }),
+    ui: ((.ui // {}) + {
+      earcons: (.ui.earcons // true),
+      hud_position: (.ui.hud_position // "top-center")
     })
   }' <<<"$existing")
 install -m 600 /dev/null "$CONFIG_PATH"
