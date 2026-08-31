@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from omarvis import daemon
 from omarvis.catalog import catalog_from_data
 from omarvis.daemon import (
     ExecutionResult,
@@ -21,6 +22,62 @@ FIXTURES = Path(__file__).parent / "fixtures"
 def test_text_only_notification_does_not_claim_to_be_listening():
     assert initial_session_notification(False) == "Listening"
     assert initial_session_notification(True) == "Processing text command"
+
+
+def test_text_only_session_ends_after_its_agent_response(monkeypatch):
+    conversations = []
+
+    class FakeConversation:
+        def __init__(self, **options):
+            self.options = options
+            self._ws = object()
+            self.ended = False
+            self.messages = []
+            conversations.append(self)
+
+        def start_session(self):
+            pass
+
+        def send_user_message(self, message):
+            self.messages.append(message)
+            self.options["callback_agent_response"]("done")
+
+        def end_session(self):
+            self.ended = True
+
+        def wait_for_session_end(self):
+            pass
+
+    class FakeNotifier:
+        def start(self, _description):
+            pass
+
+        def update(self, _headline, _description):
+            pass
+
+    monkeypatch.setattr("elevenlabs.ElevenLabs", lambda **_options: object())
+    monkeypatch.setattr(
+        "elevenlabs.conversational_ai.conversation.Conversation",
+        FakeConversation,
+    )
+    monkeypatch.setattr("omarvis.catalog.catalog_variables", lambda **_options: {})
+    monkeypatch.setattr("omarvis.catalog.load_catalog", omarchy_catalog)
+    monkeypatch.setattr(daemon, "Notifier", FakeNotifier)
+
+    result = daemon.run_session(
+        {
+            "agent_id": "agent",
+            "ask_agent_id": "ask",
+            "herdr_announcements": False,
+        },
+        "key",
+        text_only=True,
+        messages=["open a terminal"],
+    )
+
+    assert result == 0
+    assert conversations[0].messages == ["open a terminal"]
+    assert conversations[0].ended is True
 
 
 def omarchy_catalog():

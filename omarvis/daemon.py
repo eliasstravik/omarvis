@@ -970,6 +970,8 @@ def run_session(
         emit_state("speaking")
         emit_event({"event": "agent", "text": text})
         notifier.update("Omarvis", text)
+        if text_only:
+            session_ended.set()
 
     def on_end(*_args: Any) -> None:
         session_ended.set()
