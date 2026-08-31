@@ -101,7 +101,7 @@ updated=$(jq \
   --arg browser_mode "$BROWSER_MODE" \
   --arg agent_browser_path "$AGENT_BROWSER_PATH" \
   --arg browser_executable_path "$BROWSER_EXECUTABLE" \
-  '. + {
+  '(del(.vision)) + {
     agent_id: (.agent_id // ""),
     ask_agent_id: (.ask_agent_id // ""),
     llm: (.llm // "gpt-5.6-sol"),
@@ -117,14 +117,6 @@ updated=$(jq \
       cleanup: (.dictation.cleanup // true),
       model_id: (.dictation.model_id // "scribe_v2"),
       chunk_size: (.dictation.chunk_size // 500)
-    }),
-    vision: ((.vision // {}) + {
-      enabled: (.vision.enabled // false),
-      provider: (.vision.provider // "anthropic"),
-      model: (.vision.model // ""),
-      api_key_path: (.vision.api_key_path // "~/.config/omarchy/omarvis/vision_api_key"),
-      endpoint: (.vision.endpoint // "https://api.anthropic.com/v1/messages"),
-      max_tokens: (.vision.max_tokens // 500)
     })
   }' <<<"$existing")
 install -m 600 /dev/null "$CONFIG_PATH"

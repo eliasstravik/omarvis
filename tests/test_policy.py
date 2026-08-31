@@ -379,7 +379,6 @@ ASK_READ_COMMANDS = [
         "text", "html", "value", "attr", "title", "url", "count", "box", "styles"
     )),
     *(f"agent-browser is {verb}" for verb in ("visible", "enabled", "checked")),
-    "omarchy capture text",
     "omarchy capture screenshot",
     "omarchy screenshot",
     "omarchy theme current",
@@ -395,6 +394,18 @@ def test_ask_scope_allows_only_the_documented_read_routes(command):
     decision = decide(command, catalog=omarchy_catalog(), scope="ask")
 
     assert decision.kind == "run"
+
+
+@pytest.mark.parametrize("scope", ["agent", "ask"])
+def test_all_scopes_force_screen_reading_through_elevenlabs(scope):
+    decision = decide(
+        "omarchy capture text",
+        catalog=omarchy_catalog(),
+        scope=scope,
+    )
+
+    assert decision.kind == "reject"
+    assert "use omarvis see" in decision.reason
 
 
 ASK_MUTATING_COMMANDS = [

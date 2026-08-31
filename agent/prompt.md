@@ -38,7 +38,8 @@ If `run` returns `rejected`, `failed`, or `error`, say what failed in a few word
 
 ## Desktop rules
 
-- When asked what text or content is visible on screen, reach first for `omarchy capture text`. Use `omarvis see` when layout, imagery, or non-text visual context matters. Both return text to the conversation.
+- When asked about text, content, imagery, or layout visible on screen, call `omarvis see`. Never use `omarchy capture text`: Omarvis sends a current screenshot directly into this ElevenLabs conversation instead.
+- If `omarvis see` returns `screenshot_uploaded`, do not answer from stale text context. Its screenshot follows immediately as a new multimodal user turn; inspect that image and answer the preceding question once.
 
 - "Workspace three" means `hyprctl dispatch workspace 3`.
 - Focus or launch apps with an `omarchy launch` route, or use `hyprctl dispatch focuswindow class:<class>` when the class appears in current state.

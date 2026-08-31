@@ -10,6 +10,7 @@ from omarvis.daemon import (
     ExecutionResult,
     RunToolHandler,
     compact_browser_tabs,
+    send_tool_result_then_screenshot,
     wait_for_conversation_connection,
 )
 
@@ -761,7 +762,7 @@ def test_load_config_deep_merges_dictation_defaults(tmp_path):
     }
 
 
-def test_load_config_deep_merges_vision_defaults(tmp_path):
+def test_load_config_discards_removed_anthropic_vision_block(tmp_path):
     from omarvis.daemon import load_config
 
     path = tmp_path / "config.json"
@@ -769,64 +770,35 @@ def test_load_config_deep_merges_vision_defaults(tmp_path):
 
     config = load_config(path)
 
-    assert config["vision"]["enabled"] is True
-    assert config["vision"]["model"] == "vision-model"
-    assert config["vision"]["provider"] == "anthropic"
-    assert config["vision"]["max_tokens"] == 500
+    assert "vision" not in config
 
 
 @pytest.mark.parametrize("scope", ["agent", "ask"])
-def test_omarvis_see_is_intercepted_in_process_and_deletes_screenshot(
-    tmp_path, scope
-):
-    screenshot = tmp_path / "screenshot-test.png"
-    screenshot.write_bytes(b"png")
-    key_path = tmp_path / "vision-key"
-    key_path.write_text("key")
-    calls = []
-
-    def capture(config):
-        calls.append(("capture", config["vision"]["model"]))
-        return screenshot
-
-    def describe(path, config):
-        calls.append(("describe", path.read_bytes(), config["provider"]))
-        return "Two terminal windows are visible."
-
+def test_omarvis_see_queues_an_elevenlabs_file_for_the_tool_call(scope):
     def executor(*_args, **_kwargs):
         raise AssertionError("omarvis see must never be subprocessed")
 
     handler = RunToolHandler(
         catalog=omarchy_catalog(),
         dispatchers=set(),
-        config={
-            "vision": {
-                "enabled": True,
-                "provider": "anthropic",
-                "model": "vision-model",
-                "api_key_path": str(key_path),
-            }
-        },
+        config={},
         executor=executor,
         scope=scope,
-        vision_client=describe,
-        screenshot_capture=capture,
+        screenshot_sender=lambda: "file-current-desktop",
     )
 
-    serialized = handler.handle_client_tool({"command": "omarvis see"})
+    serialized = handler.handle_client_tool(
+        {"command": "omarvis see", "tool_call_id": "tool-1"}
+    )
     result = json.loads(serialized)
 
     assert isinstance(serialized, str)
-    assert result["status"] == "ok"
-    assert result["stdout"] == "Two terminal windows are visible."
-    assert calls == [
-        ("capture", "vision-model"),
-        ("describe", b"png", "anthropic"),
-    ]
-    assert not screenshot.exists()
+    assert result["status"] == "screenshot_uploaded"
+    assert handler.take_pending_screenshot("tool-1") == "file-current-desktop"
+    assert handler.take_pending_screenshot("tool-1") is None
 
 
-def test_omarvis_see_is_clear_when_vision_is_unconfigured():
+def test_omarvis_see_is_clear_outside_an_active_elevenlabs_session():
     handler = RunToolHandler(
         catalog=omarchy_catalog(),
         dispatchers=set(),
@@ -839,7 +811,78 @@ def test_omarvis_see_is_clear_when_vision_is_unconfigured():
     result = handler.handle({"command": "omarvis see"})
 
     assert result["status"] == "unavailable"
-    assert "Vision is not configured" in result["reason"]
+    assert "active ElevenLabs conversation" in result["reason"]
+
+
+def test_tool_result_is_sent_before_the_native_screenshot_turn():
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        screenshot_sender=lambda: "file-current-desktop",
+    )
+    parameters = {"command": "omarvis see", "tool_call_id": "tool-1"}
+    tool_result = handler.handle_client_tool(parameters)
+    calls = []
+
+    send_tool_result_then_screenshot(
+        {"type": "client_tool_result", "result": tool_result},
+        parameters,
+        handler,
+        send_response=lambda response: calls.append(("tool", response)),
+        send_multimodal=lambda **message: calls.append(("screenshot", message)),
+    )
+
+    assert [kind for kind, _value in calls] == ["tool", "screenshot"]
+    assert calls[1][1]["file_id"] == "file-current-desktop"
+    assert "preceding user question" in calls[1][1]["text"]
+
+
+def test_normal_tool_result_does_not_send_a_screenshot_turn():
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+    )
+    calls = []
+
+    send_tool_result_then_screenshot(
+        {"type": "client_tool_result", "result": "ok"},
+        {"command": "hyprctl clients -j", "tool_call_id": "tool-2"},
+        handler,
+        send_response=lambda response: calls.append(("tool", response)),
+        send_multimodal=lambda **message: calls.append(("screenshot", message)),
+    )
+
+    assert [kind for kind, _value in calls] == ["tool"]
+
+
+def test_screenshot_send_failure_is_reported_after_single_tool_result():
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        screenshot_sender=lambda: "file-current-desktop",
+    )
+    parameters = {"command": "omarvis see", "tool_call_id": "tool-3"}
+    result = handler.handle_client_tool(parameters)
+    responses = []
+    errors = []
+
+    send_tool_result_then_screenshot(
+        {"type": "client_tool_result", "result": result},
+        parameters,
+        handler,
+        send_response=responses.append,
+        send_multimodal=lambda **_message: (_ for _ in ()).throw(
+            RuntimeError("websocket closed")
+        ),
+        error_sink=errors.append,
+    )
+
+    assert len(responses) == 1
+    assert errors == ["websocket closed"]
+    assert handler.take_pending_screenshot("tool-3") is None
 
 
 def test_category_approval_is_fresh_scoped_and_cleared_with_the_session():

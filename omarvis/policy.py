@@ -128,7 +128,6 @@ ASK_BROWSER_ROUTES = frozenset(
 )
 ASK_OMARCHY_ROUTES = frozenset(
     {
-        ("omarchy", "capture", "text"),
         ("omarchy", "capture", "screenshot"),
         ("omarchy", "theme", "current"),
         ("omarchy", "theme", "list"),
@@ -464,6 +463,11 @@ def decide(
         "omarvis",
     }:
         return Decision("reject", reason="unsupported command")
+    if argv[:3] == ("omarchy", "capture", "text"):
+        return Decision(
+            "reject",
+            reason="OCR is disabled; use omarvis see for an ElevenLabs screenshot.",
+        )
     if scope == "ask":
         if argv == ("omarvis", "see"):
             return Decision("run", argv)

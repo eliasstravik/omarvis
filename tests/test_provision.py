@@ -21,6 +21,11 @@ def test_conversation_payload_enables_end_call_as_a_system_tool():
     }
     assert tools[1]["type"] == "client"
     assert tools[1]["name"] == "run"
+    assert payload["conversation"]["file_input"] == {
+        "enabled": True,
+        "max_files_in_memory": 3,
+        "max_files_per_conversation": 10,
+    }
     placeholders = payload["agent"]["dynamic_variables"][
         "dynamic_variable_placeholders"
     ]

@@ -18,3 +18,11 @@ def test_setup_migrates_legacy_ask_ipc_binding():
     assert 'omarchy-shell omarvis toggleMode ask' in script
     assert 'needs_ask_rebind=true' in script
     assert 'sed -i "\\|$ASK_LEGACY_BINDING|d"' in script
+
+
+def test_setup_removes_legacy_external_vision_configuration():
+    script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
+
+    assert "del(.vision)" in script
+    assert "anthropic" not in script.lower()
+    assert "vision_api_key" not in script

@@ -29,7 +29,7 @@ Setup prints the J-key family and can append any missing bindings after making a
 
 ```lua
 o.bind("SUPER + CTRL + J", "Omarvis", "omarchy-shell omarvis toggle")
-o.bind("SUPER + SHIFT + J", "Omarvis Ask", "omarchy-shell omarvis toggle ask")
+o.bind("SUPER + SHIFT + J", "Omarvis Ask", "omarchy-shell omarvis toggleMode ask")
 hl.unbind("SUPER + J") -- replaces Omarchy's Toggle window split binding where present
 o.bind("SUPER + J", "Omarvis Dictate", "omarchy-shell omarvis dictate start")
 o.bind("SUPER + J", "Omarvis Dictate Stop", "omarchy-shell omarvis dictate stop", { release = true })
@@ -46,7 +46,7 @@ Herdr support includes reading agent and workspace state, focusing agents and pa
 
 Browser support includes navigation, tab management, snapshots, clicking, filling fields, keyboard input, page titles, screenshots, downloads, and uploads. Omarvis opens its own tab for the first navigation. It only changes to one of your other tabs when you ask it to switch.
 
-Ask mode is enforced in Python policy: dispatchers, navigation, clicks, launches, and every other mutation are refused even if the model requests one. `omarvis see` is intercepted in-process and can return a text-only screenshot description when an optional vision provider is configured.
+Ask mode is enforced in Python policy: dispatchers, navigation, clicks, launches, and every other mutation are refused even if the model requests one. `omarvis see` is intercepted in-process, captures the current desktop, uploads it into the active ElevenLabs conversation, and follows the tool result with a native multimodal image turn. The old local OCR route is policy-blocked.
 
 Omarvis does not provide a wake word, always-on listening, general shell access, arbitrary JavaScript evaluation, tmux control, or agent-selected keystroke injection into ordinary desktop windows. Dictation is the sole injection path and types only the user's direct Scribe transcript.
 
@@ -58,9 +58,9 @@ The daemon records the exact parsed argument list, waits for a later user transc
 
 After one confirmed non-permanent-risk command, Omarvis may offer to stop asking for that category for the rest of the session. Category approvals disappear when the session ends. Deletes, closes, session/server stops, and system power actions always require fresh confirmation.
 
-## Memory and vision
+## Memory and screenshots
 
-Setup seeds `~/.config/omarchy/omarvis/profile.md`; up to 2,000 characters are supplied to both agents. Vision is off by default. To enable the Anthropic adapter, set `vision.enabled`, `vision.model`, and `vision.api_key_path` in `config.json`. Screenshots used by `omarvis see` are deleted immediately after description.
+Setup seeds `~/.config/omarchy/omarvis/profile.md`; up to 2,000 characters are supplied to both agents. Both agents have ElevenLabs file input enabled. Screenshots used by `omarvis see` are uploaded only on an explicit screen-content question and deleted from the local cache immediately after upload. Omarvis has no Anthropic integration or vision API key.
 
 ## Browser setup
 
@@ -74,7 +74,7 @@ In `real-profile` and `own-browser` modes Omarvis can use your logged-in account
 
 ## Privacy
 
-During a session, your microphone audio, profile memory, the Omarchy, Herdr, and browser command lists, your workspace number, the class and title of your open windows, your Herdr workspace and agent names and their working-directory paths, and your open browser tab titles and hosts are sent to ElevenLabs. Any page snapshot or text Omarvis requests is also sent to ElevenLabs. Dictation audio is sent to ElevenLabs Scribe on release. If vision is enabled, a screenshot is sent to the configured provider. Nothing is sent while Omarvis is idle or while the dictation daemon is waiting.
+During a session, your microphone audio, profile memory, the Omarchy, Herdr, and browser command lists, your workspace number, the class and title of your open windows, your Herdr workspace and agent names and their working-directory paths, and your open browser tab titles and hosts are sent to ElevenLabs. Any page snapshot or text Omarvis requests is also sent to ElevenLabs. A current desktop screenshot is uploaded to ElevenLabs only when `omarvis see` is invoked, and ElevenLabs bills each uploaded file. Dictation audio is sent to ElevenLabs Scribe on release. Nothing is sent while Omarvis is idle or while the dictation daemon is waiting.
 
 ElevenLabs bills Agents sessions by conversation minute. LLM usage may be billed separately as pass-through usage. Omarvis starts sessions only when you press the hotkey or click the widget and caps each session at five minutes.
 

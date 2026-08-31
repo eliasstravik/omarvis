@@ -27,7 +27,14 @@ def conversation_payload(prompt: str, llm: str) -> dict[str, Any]:
             "turn_timeout": 20.0,
             "silence_end_call_timeout": 30.0,
         },
-        "conversation": {"max_duration_seconds": 300},
+        "conversation": {
+            "max_duration_seconds": 300,
+            "file_input": {
+                "enabled": True,
+                "max_files_in_memory": 3,
+                "max_files_per_conversation": 10,
+            },
+        },
         "agent": {
             "first_message": "",
             "language": "en",
@@ -49,7 +56,7 @@ def conversation_payload(prompt: str, llm: str) -> dict[str, Any]:
                     {
                         "type": "client",
                         "name": "run",
-                        "description": "Run one policy-approved Omarchy, Hyprland, Herdr, browser, or Omarvis vision command on the user's computer.",
+                        "description": "Run one policy-approved Omarchy, Hyprland, Herdr, browser, or Omarvis screenshot command on the user's computer.",
                         "expects_response": True,
                         "response_timeout_secs": 35,
                         "parameters": {
@@ -89,6 +96,7 @@ def manual_steps() -> str:
 - LLM: GPT-5.6 Sol (`gpt-5.6-sol`).
 - First message: empty. Language: English.
 - Turn timeout: 20 seconds. Silence end-call timeout: 30 seconds. Maximum duration: 300 seconds.
+- Enable file input with at most 3 files in memory and 10 files per conversation.
 - Enable the `end_call` system tool.
 - Add a Client tool named `run` with Wait for response enabled and a 35-second response timeout.
 - `run` parameters: required string `command`; optional booleans `confirmed` and `approve_category`.

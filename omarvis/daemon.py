@@ -126,8 +126,7 @@ class RunToolHandler:
         state_provider: Callable[[], str] | None = None,
         state_refresh_delay: float = 2.0,
         scope: str = "agent",
-        vision_client: Callable[[Path, Mapping[str, Any]], str] | None = None,
-        screenshot_capture: Callable[[Mapping[str, Any]], Path] | None = None,
+        screenshot_sender: Callable[[], str] | None = None,
     ) -> None:
         self.catalog = catalog
         self.dispatchers = frozenset(dispatchers)
@@ -140,8 +139,7 @@ class RunToolHandler:
         self.state_provider = state_provider
         self.state_refresh_delay = state_refresh_delay
         self.scope = scope
-        self.vision_client = vision_client
-        self.screenshot_capture = screenshot_capture
+        self.screenshot_sender = screenshot_sender
         self._condition = threading.Condition()
         self._pending: PendingConfirmation | None = None
         self._category_offer: CategoryApprovalOffer | None = None
@@ -150,6 +148,7 @@ class RunToolHandler:
         self._browser_mode: str | None = None
         self._browser_tab_owned = False
         self._refresh_thread: threading.Thread | None = None
+        self._pending_screenshots: dict[str, str] = {}
 
     def _execute_default(
         self,
@@ -200,6 +199,7 @@ class RunToolHandler:
             self._pending = None
             self._category_offer = None
             self._approved_categories.clear()
+            self._pending_screenshots.clear()
 
     def _approve_category(
         self, command: str, *, confirmed: bool
@@ -380,44 +380,28 @@ class RunToolHandler:
         self._refresh_thread = threading.Thread(target=push, daemon=True)
         self._refresh_thread.start()
 
-    def _handle_vision(self) -> dict[str, Any]:
-        from .vision import (
-            anthropic_description,
-            capture_screenshot,
-            vision_configuration_error,
-        )
-
-        vision_config = self.config.get("vision", {})
-        if not isinstance(vision_config, Mapping):
+    def _handle_screenshot(self, tool_call_id: str) -> dict[str, Any]:
+        if self.screenshot_sender is None:
             return {
                 "status": "unavailable",
-                "reason": "Vision is not configured: vision must be a config object.",
+                "reason": "Screenshot delivery requires an active ElevenLabs conversation.",
             }
-        configuration_error = vision_configuration_error(vision_config)
-        if configuration_error is not None:
-            return {"status": "unavailable", "reason": configuration_error}
-        screenshot: Path | None = None
         try:
-            capture = self.screenshot_capture or capture_screenshot
-            describe = self.vision_client or anthropic_description
-            screenshot = capture(self.config)
-            description = describe(screenshot, vision_config).strip()
-            if not description:
-                raise RuntimeError("Vision provider returned no text description")
+            file_id = self.screenshot_sender().strip()
+            if not file_id:
+                raise RuntimeError("ElevenLabs screenshot upload returned no file ID")
+            with self._condition:
+                self._pending_screenshots[tool_call_id] = file_id
             return {
-                "status": "ok",
-                "exit_code": 0,
-                "stdout": description,
-                "stderr": "",
+                "status": "screenshot_uploaded",
+                "message": "The screenshot will arrive as the next ElevenLabs user turn.",
             }
-        except Exception as error:  # noqa: BLE001 - tool errors become strings
+        except Exception as error:  # noqa: BLE001 - tool errors become tool text
             return {"status": "failed", "reason": str(error)}
-        finally:
-            if screenshot is not None:
-                try:
-                    screenshot.unlink(missing_ok=True)
-                except OSError:
-                    pass
+
+    def take_pending_screenshot(self, tool_call_id: str) -> str | None:
+        with self._condition:
+            return self._pending_screenshots.pop(tool_call_id, None)
 
     def handle(self, parameters: Mapping[str, Any]) -> dict[str, Any]:
         try:
@@ -456,7 +440,9 @@ class RunToolHandler:
             ):
                 confirmed_category = confirmation_category(decision.argv)
             if decision.argv == ("omarvis", "see"):
-                return self._handle_vision()
+                return self._handle_screenshot(
+                    str(parameters.get("tool_call_id") or "")
+                )
             execution_argv = decision.argv
             timeout = 3.0
             kill_on_timeout = False
@@ -587,14 +573,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "model_id": "scribe_v2",
         "chunk_size": 500,
     },
-    "vision": {
-        "enabled": False,
-        "provider": "anthropic",
-        "model": "",
-        "api_key_path": "~/.config/omarchy/omarvis/vision_api_key",
-        "endpoint": "https://api.anthropic.com/v1/messages",
-        "max_tokens": 500,
-    },
 }
 CONFIG_DIR = Path.home() / ".config" / "omarchy" / "omarvis"
 CONFIG_PATH = CONFIG_DIR / "config.json"
@@ -611,18 +589,14 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
         loaded = json.loads(path.read_text())
         if not isinstance(loaded, Mapping):
             raise ValueError(f"{path} must contain a JSON object")
+        loaded = dict(loaded)
+        loaded.pop("vision", None)
         config.update(loaded)
         configured_dictation = loaded.get("dictation", {})
         if isinstance(configured_dictation, Mapping):
             config["dictation"] = {
                 **DEFAULT_CONFIG["dictation"],
                 **configured_dictation,
-            }
-        configured_vision = loaded.get("vision", {})
-        if isinstance(configured_vision, Mapping):
-            config["vision"] = {
-                **DEFAULT_CONFIG["vision"],
-                **configured_vision,
             }
     return config
 
@@ -856,6 +830,34 @@ def wait_for_conversation_connection(
     raise RuntimeError("Timed out waiting for ElevenLabs to connect")
 
 
+SCREENSHOT_FOLLOWUP = (
+    "This current desktop screenshot was requested by the preceding user question. "
+    "Inspect the attached image and answer that question directly."
+)
+
+
+def send_tool_result_then_screenshot(
+    response: Mapping[str, Any],
+    parameters: Mapping[str, Any],
+    handler: RunToolHandler,
+    *,
+    send_response: Callable[[Mapping[str, Any]], None],
+    send_multimodal: Callable[..., None],
+    error_sink: Callable[[str], None] | None = None,
+) -> None:
+    """Preserve protocol ordering: tool result first, screenshot user turn second."""
+    send_response(response)
+    tool_call_id = str(parameters.get("tool_call_id") or "")
+    file_id = handler.take_pending_screenshot(tool_call_id)
+    if file_id is None:
+        return
+    try:
+        send_multimodal(text=SCREENSHOT_FOLLOWUP, file_id=file_id)
+    except Exception as error:  # noqa: BLE001 - keep the tool callback thread alive
+        if error_sink is not None:
+            error_sink(str(error))
+
+
 def run_session(
     config: Mapping[str, Any],
     api_key: str,
@@ -877,6 +879,7 @@ def run_session(
         desktop_state,
         load_catalog,
     )
+    from .screenshot import capture_and_upload_screenshot
 
     stop_requested = threading.Event()
     session_ended = threading.Event()
@@ -900,6 +903,20 @@ def run_session(
         if event.get("event") == "ran":
             notifier.update("Omarvis", f"Ran: {event.get('command', 'command')}")
 
+    client = ElevenLabs(api_key=api_key)
+    conversation_holder: dict[str, Any] = {}
+
+    def upload_screenshot() -> str:
+        conversation = conversation_holder.get("conversation")
+        conversation_id = str(
+            getattr(conversation, "_conversation_id", "") or ""
+        )
+        return capture_and_upload_screenshot(
+            client,
+            conversation_id,
+            config,
+        )
+
     handler = RunToolHandler(
         catalog=catalog,
         dispatchers=HYPR_DISPATCHERS,
@@ -908,8 +925,35 @@ def run_session(
         event_sink=on_tool_event,
         state_provider=desktop_state,
         scope=mode,
+        screenshot_sender=upload_screenshot,
     )
-    client_tools = ClientTools()
+
+    class ScreenshotClientTools(ClientTools):
+        def execute_tool(
+            self,
+            tool_name: str,
+            parameters: dict[str, Any],
+            callback: Callable[[dict[str, Any]], None],
+        ) -> None:
+            def ordered_callback(response: dict[str, Any]) -> None:
+                conversation = conversation_holder.get("conversation")
+                send_tool_result_then_screenshot(
+                    response,
+                    parameters,
+                    handler,
+                    send_response=callback,
+                    send_multimodal=conversation.send_multimodal_message,
+                    error_sink=lambda message: emit_event(
+                        {
+                            "event": "error",
+                            "message": f"Screenshot delivery failed: {message}",
+                        }
+                    ),
+                )
+
+            super().execute_tool(tool_name, parameters, ordered_callback)
+
+    client_tools = ScreenshotClientTools()
     client_tools.register("run", handler.handle_client_tool)
 
     def on_user(text: str) -> None:
@@ -932,7 +976,7 @@ def run_session(
         else _selected_audio_interface(config.get("input_device_index"))
     )
     conversation = Conversation(
-        client=ElevenLabs(api_key=api_key),
+        client=client,
         agent_id=str(config["ask_agent_id"] if mode == "ask" else config["agent_id"]),
         requires_auth=True,
         audio_interface=audio_interface,
@@ -942,6 +986,7 @@ def run_session(
         callback_agent_response=on_agent,
         callback_end_session=on_end,
     )
+    conversation_holder["conversation"] = conversation
     notifier.start()
     emit_state("starting")
     if stop_requested.is_set():
