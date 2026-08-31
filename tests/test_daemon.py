@@ -10,11 +10,17 @@ from omarvis.daemon import (
     ExecutionResult,
     RunToolHandler,
     compact_browser_tabs,
+    initial_session_notification,
     send_tool_result_then_screenshot,
     wait_for_conversation_connection,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_text_only_notification_does_not_claim_to_be_listening():
+    assert initial_session_notification(False) == "Listening"
+    assert initial_session_notification(True) == "Processing text command"
 
 
 def omarchy_catalog():

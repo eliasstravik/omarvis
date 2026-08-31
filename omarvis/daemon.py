@@ -630,11 +630,15 @@ def sweep_screenshot_cache(
     return removed
 
 
+def initial_session_notification(text_only: bool) -> str:
+    return "Processing text command" if text_only else "Listening"
+
+
 class Notifier:
     def __init__(self) -> None:
         self.notification_id = ""
 
-    def start(self) -> None:
+    def start(self, description: str = "Listening") -> None:
         try:
             completed = subprocess.run(
                 [
@@ -643,7 +647,7 @@ class Notifier:
                     "-g",
                     chr(0xF130),
                     "Omarvis",
-                    "Listening",
+                    description,
                 ],
                 capture_output=True,
                 text=True,
@@ -987,7 +991,7 @@ def run_session(
         callback_end_session=on_end,
     )
     conversation_holder["conversation"] = conversation
-    notifier.start()
+    notifier.start(initial_session_notification(text_only))
     emit_state("starting")
     if stop_requested.is_set():
         return 0
