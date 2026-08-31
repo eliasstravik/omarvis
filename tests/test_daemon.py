@@ -1185,3 +1185,107 @@ def test_screenshot_cache_sweep_only_ages_out_owned_pngs(tmp_path):
     assert not old.exists()
     assert fresh.exists()
     assert unrelated.exists()
+
+
+def test_audio_interface_stop_is_idempotent_and_never_tears_down_on_caller():
+    # The SDK may call stop() from the PortAudio input-callback thread;
+    # closing the stream there deadlocks PortAudio and end_session never
+    # reached callback_end_session, so "end call" hung intermittently.
+    # stop() must return immediately, run teardown on its own thread, and
+    # be idempotent.
+    from types import SimpleNamespace
+
+    closed_from = []
+
+    class Stream:
+        def stop_stream(self):
+            pass
+
+        def close(self):
+            closed_from.append(threading.get_ident())
+
+        def write(self, _audio):
+            pass
+
+    class PyAudio:
+        def open(self, **_options):
+            return Stream()
+
+        def terminate(self):
+            closed_from.append("terminated")
+
+    levels = SimpleNamespace(update_in=lambda _v: None, update_out=lambda _v: None)
+    interface = daemon._metered_audio_interface(None, levels)
+    interface.pyaudio = SimpleNamespace(PyAudio=PyAudio, paInt16=8, paContinue=0)
+    interface.start(lambda _audio: None)
+
+    interface.stop()
+    first_teardown = interface._teardown_thread
+    interface.stop()  # second call must not start another teardown
+
+    assert interface._teardown_thread is first_teardown
+    first_teardown.join(3.0)
+    assert "terminated" in closed_from
+    caller = threading.get_ident()
+    assert all(entry != caller for entry in closed_from if entry != "terminated")
+
+
+def test_session_watchdog_ends_loop_when_sdk_stops_without_callback(monkeypatch):
+    # end_call closes the socket server-side; if callback_end_session never
+    # fires, the daemon must still notice the SDK gave up and end the
+    # session instead of listening forever.
+    events = []
+
+    class FakeConversation:
+        def __init__(self, **options):
+            self.options = options
+            self._ws = object()
+            self._should_stop = threading.Event()
+            self._should_stop.set()  # SDK decided to stop; no callback fired
+            self.ended = False
+
+        def start_session(self):
+            pass
+
+        def send_user_message(self, message):
+            pass
+
+        def end_session(self):
+            self.ended = True
+
+        def wait_for_session_end(self):
+            pass
+
+    monkeypatch.setattr("elevenlabs.ElevenLabs", lambda **_options: object())
+    monkeypatch.setattr(
+        "elevenlabs.conversational_ai.conversation.Conversation",
+        FakeConversation,
+    )
+    monkeypatch.setattr("omarvis.catalog.catalog_variables", lambda **_options: {})
+    monkeypatch.setattr("omarvis.catalog.load_catalog", omarchy_catalog)
+    monkeypatch.setattr(daemon, "emit_event", events.append)
+    # Signal handlers can only be installed on the main thread; the test
+    # runs the session on a worker so a regression can't hang pytest.
+    monkeypatch.setattr(daemon.signal, "signal", lambda *_args: None)
+
+    result = {}
+    worker = threading.Thread(
+        target=lambda: result.setdefault(
+            "code",
+            daemon.run_session(
+                {
+                    "agent_id": "agent",
+                    "ask_agent_id": "ask",
+                    "herdr_announcements": False,
+                },
+                "key",
+                text_only=True,
+                messages=[],
+            ),
+        ),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(5.0)
+
+    assert result.get("code") == 0

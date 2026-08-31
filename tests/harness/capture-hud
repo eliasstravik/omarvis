@@ -9,6 +9,12 @@ LOG_PATH="$OUTPUT_DIR/harness.log"
 
 mkdir -p "$OUTPUT_DIR"
 export QML_IMPORT_PATH="$(dirname -- "$REPO_DIR")${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
+
+# HudWindow imports the shell's qs.Commons/qs.Ui singletons. Quickshell
+# resolves `qs` against the config root (the harness directory here), so
+# expose the packaged shell modules inside it.
+ln -sfn /usr/share/omarchy/shell/Commons "$HARNESS_DIR/Commons"
+ln -sfn /usr/share/omarchy/shell/Ui "$HARNESS_DIR/Ui"
 export OMARVIS_SIMULATE=1
 export OMARVIS_SIMULATE_ERROR=1
 export OMARVIS_HUD_CAPTURE_DIR="$OUTPUT_DIR"

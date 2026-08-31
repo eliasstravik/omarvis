@@ -1,24 +1,36 @@
 import QtQuick
-import QtQuick.Layouts
 import Quickshell
 import Quickshell.Wayland
+import qs.Commons
+import qs.Ui
 
+// Text-free voice strip, a sibling of the volume OSD: one state glyph and
+// one amplitude bar carry the whole story — who holds the floor (mic vs
+// speaker glyph, foreground vs accent fill), whether the mic is hot (the
+// bar.active attention color), a running command (cog in the glyph slot,
+// then a ✓ flash), and hands-free mode (the border goes to the attention
+// color, the same border-carries-state idiom the lock screen and polkit
+// use). Conversation and command text are deliberately absent: audio is the
+// channel, errors go to the notification server, and the bar widget's
+// tooltip carries the text on demand.
 PanelWindow {
   id: hud
 
   property var service: null
   property var shell: null
   property string hudPosition: "top-center"
-  property color foregroundColor: "#f2f4f5"
-  property color backgroundColor: "#e6101315"
-  property color accentColor: "#7dcfff"
-  property color urgentColor: "#ff6b6b"
   property bool speakingFallback: false
   property bool toolSucceeded: false
-  property string toolText: ""
+  // A call that just ended gets a short goodbye beat: the strip lingers
+  // with a waving hand before disappearing.
+  property bool waving: false
+  property string lastSessionState: "idle"
 
   readonly property bool dictating: service && service.dictationState !== "idle"
-  readonly property bool hudVisible: service && (service.sessionState !== "idle" || service.dictationState !== "idle")
+  // Session errors live in a desktop notification, not on the strip.
+  readonly property bool hudVisible: waving || (service
+    && ((service.sessionState !== "idle" && service.sessionState !== "error")
+      || service.dictationState !== "idle"))
   readonly property real userLevel: !service ? 0.0 : (dictating ? service.dictationLevel : service.inLevel)
   readonly property string visualState: {
     if (!service) return "idle"
@@ -27,27 +39,72 @@ PanelWindow {
     return service.sessionState
   }
   readonly property bool errorState: visualState === "error"
-  readonly property string prefix: service && service.currentMode === "ask" && service.sessionState !== "idle" ? "Ask · " : ""
-  readonly property string stateLabel: {
-    if (visualState === "recording") return "● Dictating…"
-    if (visualState === "transcribing") return "Transcribing…"
-    if (visualState === "starting") return "Connecting…"
-    if (visualState === "thinking") return "Thinking…"
-    if (visualState === "speaking") return "Speaking…"
-    if (visualState === "error") return "Voice session failed"
-    return "Listening…"
-  }
-  readonly property string displayText: {
-    if (!service) return stateLabel
-    if (service.lastError) return prefix + service.lastError
-    if (service.streamingAgent) return prefix + service.streamingAgent
-    if (service.lastAgent) return prefix + service.lastAgent
-    if (service.lastUser) return prefix + "You: " + service.lastUser
-    return prefix + stateLabel
+  readonly property bool toolRunning: service && service.runningCommand.length > 0
+  readonly property bool handsFree: service && service.dictationLocked === true
+
+  // Same glyph vocabulary as BarWidget (and the stock voxtype indicator for
+  // the dictation states), so bar and HUD read as one module. A running
+  // command is just another state, so it lives in the same slot: cog while
+  // executing, a short ✓ flash when done.
+  // Iconic actions get their own glyph while running; everything else is
+  // the wrench. Deliberately tiny — a glyph vocabulary only stays readable
+  // if it is small.
+  function toolGlyphFor(command) {
+    var cmd = String(command || "")
+    if (cmd.indexOf("screenshot") !== -1 || cmd.indexOf("screenrecord") !== -1
+      || cmd.indexOf("omarchy capture") !== -1 || cmd.indexOf("omarchy-capture") !== -1)
+      return String.fromCodePoint(0xF0100)
+    if (cmd.indexOf("theme") !== -1) return String.fromCodePoint(0xF03D8)
+    if (cmd.indexOf("omarchy system") !== -1 || cmd.indexOf("omarchy-system") !== -1)
+      return String.fromCodePoint(0xF0425)
+    return String.fromCodePoint(0xF05B7)
   }
 
+  readonly property string stateGlyph: {
+    if (visualState === "error") return String.fromCodePoint(0xF0026)
+    if (waving && visualState === "idle") return String.fromCodePoint(0xF1821)
+    if (toolSucceeded) return "✓"
+    if (toolRunning) return toolGlyphFor(service.runningCommand)
+    if (visualState === "transcribing") return String.fromCodePoint(0xF06D7)
+    if (visualState === "thinking") return String.fromCodePoint(0xF051F)
+    if (visualState === "speaking") return String.fromCodePoint(0xF057E)
+    return String.fromCodePoint(0xF036C)
+  }
+  readonly property color stateGlyphColor: {
+    if (errorState) return Color.urgent
+    if (waving && visualState === "idle") return Color.accent
+    // Agent-side activity is accent: its voice, its commands.
+    if (toolSucceeded || toolRunning || visualState === "speaking") return Color.accent
+    // Hot microphone: the bar.active attention color, per its shell.toml
+    // charter ("recording, voxtype, alerts, updates").
+    if (visualState === "listening" || visualState === "recording") return Color.bar.active
+    return Color.popups.text
+  }
+
+  // The bar borrows the OSD volume-bar idiom: fill tracks live amplitude —
+  // yours in foreground, the agent's in accent — so motion only ever means
+  // sound. Mapped through dBFS (-60dB empty to -20dB full) because raw
+  // speech RMS is a few percent of full scale and would barely register;
+  // the -20dB ceiling keeps ordinary speaking volume in the upper half of
+  // the bar rather than reserving it for shouting.
+  function meterFill(level) {
+    if (level <= 0) return 0
+    var db = 20 * Math.log(level) / Math.LN10
+    return Math.max(0, Math.min(1, (db + 60) / 40))
+  }
+  readonly property real meterLevel: meterFill(visualState === "speaking" && service ? service.outLevel : userLevel)
+
+  // Clear the bar edge exactly like the notification popups do, falling back
+  // to the default bar size when shell.bar isn't reachable (test harness).
+  readonly property string barPosition: shell && shell.barConfig ? String(shell.barConfig.position || "top") : "top"
+  readonly property bool barVertical: barPosition === "left" || barPosition === "right"
+  readonly property int defaultBarSize: barVertical ? Style.bar.sizeVertical : Style.bar.sizeHorizontal
+  readonly property int liveBarSize: shell && shell.bar && !shell.bar.barHidden ? Math.max(0, shell.bar.barSize) : defaultBarSize
+  readonly property int topClearance: (barPosition === "top" ? liveBarSize : 0) + Style.gapsOut
+  readonly property int rightClearance: (barPosition === "right" ? liveBarSize : 0) + Style.gapsOut
+
   function capture(path) {
-    pill.grabToImage(function(result) { result.saveToFile(path) })
+    card.grabToImage(function(result) { result.saveToFile(path) })
   }
 
   visible: hudVisible
@@ -63,19 +120,26 @@ PanelWindow {
     target: hud.service
     function onSessionStateChanged() {
       hud.speakingFallback = false
+      var state = hud.service.sessionState
+      if (state === "idle"
+        && (hud.lastSessionState === "listening"
+          || hud.lastSessionState === "speaking"
+          || hud.lastSessionState === "thinking")) {
+        hud.waving = true
+        waveTimer.restart()
+      }
+      hud.lastSessionState = state
     }
     function onOutLevelChanged() {
       if (hud.service && hud.service.outLevel >= 0.02) hud.speakingFallback = false
     }
     function onRunningCommandChanged() {
       if (hud.service && hud.service.runningCommand) {
-        hud.toolText = hud.service.runningCommand
         hud.toolSucceeded = false
         toolDoneTimer.stop()
       }
     }
     function onCommandRan(command) {
-      hud.toolText = String(command || hud.toolText)
       hud.toolSucceeded = true
       toolDoneTimer.restart()
     }
@@ -93,151 +157,86 @@ PanelWindow {
     id: toolDoneTimer
     interval: 1000
     repeat: false
-    onTriggered: {
-      hud.toolSucceeded = false
-      hud.toolText = ""
-    }
+    onTriggered: hud.toolSucceeded = false
   }
 
-  Rectangle {
-    id: pill
-    objectName: "omarvisHudPill"
-    width: Math.min(420, Math.max(300, parent.width - 32))
-    height: 54
-    x: hud.hudPosition === "top-right" ? parent.width - width - 18 : Math.round((parent.width - width) / 2)
-    y: 18
-    radius: 27
-    color: hud.backgroundColor
-    border.width: hud.errorState ? 2 : 1
-    border.color: hud.errorState ? hud.urgentColor : Qt.rgba(hud.accentColor.r, hud.accentColor.g, hud.accentColor.b, 0.55)
+  Timer {
+    id: waveTimer
+    interval: 900
+    repeat: false
+    onTriggered: hud.waving = false
+  }
 
-    RowLayout {
+  BorderSurface {
+    id: card
+    objectName: "omarvisHudCard"
+
+    readonly property int padX: Style.space(16)
+    readonly property int padY: Style.space(10)
+
+    // Fixed geometry across every state: one glyph slot, one bar. The strip
+    // never lurches — the only thing that ever moves is the amplitude fill.
+    width: card.borderLeft + card.padX
+      + glyphSlot.width + Style.space(12) + meter.width
+      + card.padX + card.borderRight
+    height: card.borderTop + card.padY + Style.space(22) + card.padY + card.borderBottom
+    x: hud.hudPosition === "top-right"
+      ? parent.width - width - hud.rightClearance
+      : Math.round((parent.width - width) / 2)
+    y: hud.topClearance
+    radius: Style.cornerRadius
+    color: Util.alpha(Color.popups.background, 0.97)
+    // Border carries mode: urgent on error, the attention color while the
+    // mic is locked open hands-free, the theme popups border otherwise.
+    borderSpec: hud.errorState
+      ? Border.flat(Color.urgent, Math.max(1, Style.space(2)))
+      : (hud.handsFree
+        ? Border.flat(Color.bar.active, Math.max(1, Style.space(2)))
+        : Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2))))
+
+    Behavior on color { ColorAnimation { duration: 420; easing.type: Easing.InOutCubic } }
+
+    Row {
       anchors.fill: parent
-      anchors.leftMargin: 16
-      anchors.rightMargin: 16
-      spacing: 12
+      anchors.topMargin: card.borderTop + card.padY
+      anchors.rightMargin: card.borderRight + card.padX
+      anchors.bottomMargin: card.borderBottom + card.padY
+      anchors.leftMargin: card.borderLeft + card.padX
+      spacing: Style.space(12)
 
       Item {
-        Layout.preferredWidth: 22
-        Layout.preferredHeight: 22
-        Rectangle {
-          id: userDot
-          objectName: "omarvisUserDot"
-          width: 16
-          height: 16
-          anchors.centerIn: parent
-          radius: 8
-          color: hud.foregroundColor
-          opacity: hud.userLevel < 0.02 ? 0.35 : 0.95
-          scale: 0.72 + hud.userLevel * 0.78
-          Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
-          Behavior on opacity { NumberAnimation { duration: 120 } }
-          Rectangle {
-            anchors.centerIn: parent
-            width: parent.width + 8
-            height: width
-            radius: width / 2
-            color: "transparent"
-            border.width: 2
-            border.color: Qt.rgba(hud.foregroundColor.r, hud.foregroundColor.g, hud.foregroundColor.b, 0.18 + hud.userLevel * 0.45)
-          }
-        }
-      }
+        id: glyphSlot
+        width: Style.space(22)
+        height: parent.height
 
-      Item {
-        Layout.fillWidth: true
-        Layout.minimumWidth: 70
-        Layout.preferredHeight: 24
         Text {
-          id: transcript
-          objectName: "omarvisHudText"
-          anchors.fill: parent
-          text: hud.displayText
-          textFormat: Text.PlainText
-          elide: Text.ElideRight
-          maximumLineCount: 1
-          color: hud.errorState ? hud.urgentColor : hud.foregroundColor
-          font.pixelSize: 14
-          verticalAlignment: Text.AlignVCenter
-        }
-      }
-
-      Item {
-        id: agentDot
-        objectName: "omarvisAgentDot"
-        Layout.preferredWidth: 22
-        Layout.preferredHeight: 22
-        scale: hud.visualState === "speaking" && hud.service
-          ? 0.72 + hud.service.outLevel * 0.78 : 1.0
-        opacity: hud.visualState === "listening" ? 0.4 : 1.0
-        Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
-
-        Rectangle {
-          width: 16
-          height: 16
+          id: stateGlyphText
+          objectName: "omarvisStateGlyph"
           anchors.centerIn: parent
-          radius: 8
-          color: hud.visualState === "thinking" ? "transparent" : (hud.errorState ? hud.urgentColor : hud.accentColor)
-          border.width: hud.visualState === "thinking" ? 2 : 0
-          border.color: hud.accentColor
-        }
-        Rectangle {
-          visible: hud.visualState === "thinking"
-          width: 5
-          height: 5
-          radius: 3
-          x: 8
-          y: 0
-          color: hud.accentColor
-        }
-        RotationAnimation on rotation {
-          running: hud.visible && hud.visualState === "thinking"
-          from: 0
-          to: 360
-          duration: 1200
-          loops: Animation.Infinite
-        }
-        SequentialAnimation on opacity {
-          running: hud.visible && hud.visualState === "thinking"
-          loops: Animation.Infinite
-          NumberAnimation { from: 1.0; to: 0.45; duration: 600 }
-          NumberAnimation { from: 0.45; to: 1.0; duration: 600 }
+          text: hud.stateGlyph
+          color: hud.stateGlyphColor
+          opacity: hud.visualState === "starting" ? 0.45 : 1.0
+          font.family: Style.font.family
+          font.pixelSize: Style.font.iconLarge
         }
       }
 
       Rectangle {
-        id: toolChip
-        objectName: "omarvisToolChip"
-        visible: (hud.service && hud.service.runningCommand.length > 0) || hud.toolSucceeded
-        Layout.preferredWidth: visible ? Math.min(145, toolRow.implicitWidth + 16) : 0
-        Layout.preferredHeight: 30
-        radius: 15
-        color: Qt.rgba(hud.foregroundColor.r, hud.foregroundColor.g, hud.foregroundColor.b, 0.12)
+        id: meter
+        objectName: "omarvisLevelMeter"
+        width: Style.space(142)
+        height: Math.max(Style.space(6), Style.spacing.sm)
+        anchors.verticalCenter: parent.verticalCenter
+        color: Util.alpha(Color.popups.text, 0.45)
 
-        Row {
-          id: toolRow
-          anchors.centerIn: parent
-          spacing: 6
-          Text {
-            id: toolGlyph
-            text: hud.toolSucceeded ? "✓" : "◌"
-            color: hud.foregroundColor
-            font.pixelSize: 14
-            RotationAnimation on rotation {
-              running: hud.visible && !hud.toolSucceeded && toolChip.visible
-              from: 0
-              to: 360
-              duration: 850
-              loops: Animation.Infinite
-            }
-          }
-          Text {
-            width: Math.min(105, implicitWidth)
-            text: hud.toolText.slice(0, 40)
-            color: hud.foregroundColor
-            textFormat: Text.PlainText
-            elide: Text.ElideRight
-            font.pixelSize: 11
+        Rectangle {
+          height: parent.height
+          width: parent.width * hud.meterLevel
+          color: hud.visualState === "speaking" ? Color.accent : Color.popups.text
+
+          Behavior on width {
+            enabled: hud.visible
+            NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
           }
         }
       }

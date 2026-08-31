@@ -762,6 +762,12 @@ def _metered_audio_interface(
     # Copied from elevenlabs 2.65.0's private DefaultAudioInterface loops.
     # Keep this implementation and bin/omarvis-setup's exact SDK pin in sync.
     class MeteredAudioInterface(DefaultAudioInterface):
+        def __init__(self) -> None:
+            super().__init__()
+            self._stop_once = threading.Lock()
+            self._stop_started = False
+            self._teardown_thread: threading.Thread | None = None
+
         def start(self, input_callback: Callable[[bytes], None]) -> None:
             self.input_callback = input_callback
             self.output_queue = queue.Queue()
@@ -799,6 +805,35 @@ def _metered_audio_interface(
         ) -> tuple[None, int]:
             level_sink.update_in(rms_level(in_data))
             return super()._in_callback(in_data, frame_count, time_info, status)
+
+        # The SDK calls stop() from whichever thread notices the closed
+        # websocket first — including the PortAudio input-callback thread
+        # (its ws.send raises once the server hangs up after end_call).
+        # The stock stop() closes in_stream synchronously, and closing a
+        # stream from inside its own callback deadlocks PortAudio, leaving
+        # end_session() stuck BEFORE callback_end_session — the session
+        # then never ended. Make stop idempotent and hand the blocking
+        # teardown to a dedicated thread so end_session() always returns.
+        def stop(self) -> None:
+            with self._stop_once:
+                if self._stop_started:
+                    return
+                self._stop_started = True
+            if not hasattr(self, "should_stop"):
+                return
+            self.should_stop.set()
+
+            def teardown() -> None:
+                try:
+                    self.output_thread.join(2.0)
+                    self.in_stream.stop_stream()
+                    self.in_stream.close()
+                    self.out_stream.close()
+                finally:
+                    self.p.terminate()
+
+            self._teardown_thread = threading.Thread(target=teardown, daemon=True)
+            self._teardown_thread.start()
 
         def _output_thread(self) -> None:
             while not self.should_stop.is_set():
@@ -1059,6 +1094,16 @@ def run_session(
             on_user(message)
             conversation.send_user_message(message)
         while not stop_requested.is_set() and not session_ended.is_set():
+            # Watchdog: don't depend solely on callback_end_session — if the
+            # SDK's session thread died or it decided to stop without the
+            # callback reaching us, treat the session as over.
+            sdk_thread = getattr(conversation, "_thread", None)
+            sdk_should_stop = getattr(conversation, "_should_stop", None)
+            if (sdk_thread is not None and not sdk_thread.is_alive()) or (
+                sdk_should_stop is not None and sdk_should_stop.is_set()
+            ):
+                session_ended.set()
+                break
             try:
                 update = contextual_updates.get(timeout=0.2)
             except queue.Empty:

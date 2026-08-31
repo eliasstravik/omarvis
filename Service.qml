@@ -13,11 +13,13 @@ Item {
   property string currentMode: "agent"
   property string pendingMode: ""
   property string dictationState: "idle"
+  property bool dictationLocked: false
   property string lastDictation: ""
   property real inLevel: 0.0
   property real outLevel: 0.0
   property string streamingAgent: ""
   property string runningCommand: ""
+  property string lastCommand: ""
   property real dictationLevel: 0.0
   property string hudPosition: "top-center"
   property var daemonCommand: []
@@ -59,6 +61,7 @@ Item {
       root.runningCommand = String(event.command || "")
     else if (event.event === "ran") {
       root.runningCommand = ""
+      root.lastCommand = String(event.command || "")
       root.commandRan(String(event.command || ""))
     }
     else if (event.event === "dictation") {
@@ -86,6 +89,8 @@ Item {
     var nextState = String(event.state || "idle")
     if (nextState !== root.dictationState && nextState !== "error") root.lastError = ""
     root.dictationState = nextState
+    if (event.locked !== undefined) root.dictationLocked = !!event.locked
+    if (nextState !== "recording") root.dictationLocked = false
     if (event.level !== undefined) root.dictationLevel = Math.max(0, Math.min(1, Number(event.level || 0)))
     else if (nextState !== "recording") root.dictationLevel = 0.0
     if (event.text) root.lastDictation = String(event.text)
@@ -143,10 +148,77 @@ Item {
 
   function dictate(action): string {
     var command = String(action || "").toLowerCase()
-    if (command !== "start" && command !== "stop") return "expected-start-or-stop"
+    var replies = { start: "recording", stop: "transcribing", handsfree: "locked", cancel: "canceled" }
+    if (!replies[command]) return "expected-start-stop-handsfree-or-cancel"
     if (!dictationDaemon.running) return "dictation-daemon-not-running"
     dictationDaemon.write(command + "\n")
-    return command === "start" ? "recording" : "transcribing"
+    return replies[command]
+  }
+
+  // While Omarvis is live, expose that to keybindings. Two separate
+  // lifetimes: the marker file bin/omarvis-space tests (SUPER+SPACE →
+  // hands-free instead of the menu) exists only during a dictation
+  // recording, so the menu keeps working during voice sessions; the dynamic
+  // plain-Escape bind exists whenever ANYTHING is live and ends it —
+  // cancels a dictation recording, hangs up a voice session, dismisses an
+  // error. Both are absent when idle, so Escape and SUPER+SPACE behave
+  // normally the rest of the time, and both are reset on startup in case a
+  // crash left them behind.
+  readonly property string dictatingMarker: Quickshell.env("XDG_RUNTIME_DIR") + "/omarvis-dictating"
+  // Error state shows no HUD (the error went to a notification), so Escape
+  // must not be silently intercepted there.
+  readonly property bool escapeLive: dictationState === "recording"
+    || (sessionState !== "idle" && sessionState !== "error")
+
+  onDictationStateChanged: updateDictationMarker()
+  onEscapeLiveChanged: updateEscapeBind()
+
+  // The HUD is deliberately text-free, so errors — the one kind of text that
+  // must be read — go to the Omarchy notification server, which wraps and
+  // persists them properly.
+  onLastErrorChanged: if (lastError) notifyError(lastError)
+
+  function notifyError(message) {
+    Quickshell.execDetached(["omarchy-notification-send",
+      "--app-name", "Omarvis",
+      "-g", String.fromCodePoint(0xF0026),
+      "-u", "normal",
+      "Omarvis voice error", String(message)])
+  }
+  Component.onCompleted: {
+    updateDictationMarker()
+    updateEscapeBind()
+  }
+
+  function updateDictationMarker() {
+    if (root.dictationState === "recording")
+      Quickshell.execDetached(["touch", root.dictatingMarker])
+    else
+      Quickshell.execDetached(["rm", "-f", root.dictatingMarker])
+  }
+
+  // Omarchy's Lua config parser rejects `hyprctl keyword bind`, so the
+  // dynamic bind goes through the same `o.bind`/`hl.unbind` Lua API the
+  // static config uses, via `hyprctl eval`.
+  function updateEscapeBind() {
+    if (root.escapeLive)
+      Quickshell.execDetached(["hyprctl", "eval",
+        "o.bind(\"ESCAPE\", \"Omarvis escape\", \"omarchy-shell omarvis esc\")"])
+    else
+      Quickshell.execDetached(["hyprctl", "eval", "hl.unbind(\"ESCAPE\")"])
+  }
+
+  // Escape ends the most immediate live thing: dictation recording first,
+  // then a running voice session, then a lingering error/stale state.
+  function escapeAction(): string {
+    if (root.dictationState === "recording") return root.dictate("cancel")
+    if (daemon.running) return root.stop()
+    if (root.sessionState !== "idle") {
+      root.sessionState = "idle"
+      root.lastError = ""
+      return "cleared"
+    }
+    return "idle"
   }
 
   Process {
@@ -215,15 +287,13 @@ Item {
     onFileChanged: reload()
   }
 
+  // Colors, typography, and radius come from the qs.Commons theme singletons
+  // inside HudWindow itself, so the HUD restyles live on omarchy theme set.
   HudWindow {
     id: hudWindow
     service: root
     shell: root.shell
     hudPosition: root.hudPosition
-    foregroundColor: root.shell && root.shell.bar ? root.shell.bar.foreground : "#f2f4f5"
-    backgroundColor: root.shell && root.shell.bar ? root.shell.bar.background : "#e6101315"
-    accentColor: root.shell && root.shell.bar ? root.shell.bar.foreground : "#7dcfff"
-    urgentColor: root.shell && root.shell.bar ? root.shell.bar.urgent : "#ff6b6b"
   }
 
   Timer {
@@ -245,6 +315,9 @@ Item {
     function startMode(mode: string): string { return root.start(mode) }
     function stop(): string { return root.stop() }
     function dictate(action: string): string { return root.dictate(action) }
+    // "escape" collides with the JS global, which QML rejects as a method
+    // name, hence "esc".
+    function esc(): string { return root.escapeAction() }
     function status(): string {
       return JSON.stringify({
         sessionState: root.sessionState,
@@ -253,11 +326,13 @@ Item {
         lastError: root.lastError,
         currentMode: root.currentMode,
         dictationState: root.dictationState,
+        dictationLocked: root.dictationLocked,
         lastDictation: root.lastDictation,
         inLevel: root.inLevel,
         outLevel: root.outLevel,
         streamingAgent: root.streamingAgent,
         runningCommand: root.runningCommand,
+        lastCommand: root.lastCommand,
         dictationLevel: root.dictationLevel,
         running: daemon.running
       })
