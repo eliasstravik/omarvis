@@ -199,6 +199,65 @@ def test_browser_commands_disable_daemon_idle_shutdown():
     )
 
 
+def test_real_profile_mode_launches_a_headed_snapshot_without_probing():
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append(tuple(argv))
+        return ExecutionResult(0, "[]", "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={
+            "agent_browser_path": "/opt/agent-browser",
+            "browser_mode": "real-profile",
+        },
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+    assert handler.handle({"command": "agent-browser tab list"})["status"] == "ok"
+    assert calls == [
+        (
+            "/opt/agent-browser",
+            "--session",
+            "omarvis",
+            "--pin-tab",
+            "--idle-timeout",
+            "0",
+            "--profile",
+            "Default",
+            "--headed",
+            "tab",
+            "list",
+        )
+    ]
+
+
+def test_real_profile_mode_uses_the_configured_profile_name():
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append(tuple(argv))
+        return ExecutionResult(0, "[]", "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={
+            "agent_browser_path": "/opt/agent-browser",
+            "browser_mode": "real-profile",
+            "browser_profile": "Work",
+        },
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+    assert handler.handle({"command": "agent-browser tab list"})["status"] == "ok"
+    assert ("--profile", "Work", "--headed") == calls[0][6:9]
+
+
 def test_browser_tab_context_is_compact_and_omits_target_ids():
     payload = json.dumps(
         {

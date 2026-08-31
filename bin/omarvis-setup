@@ -45,13 +45,8 @@ for browser in chromium google-chrome google-chrome-stable chrome; do
 done
 
 if [[ -n $AGENT_BROWSER_PATH ]]; then
-  chromium_major=0
-  if [[ -n $BROWSER_EXECUTABLE ]]; then
-    chromium_major=$($BROWSER_EXECUTABLE --version 2>/dev/null | grep -Eo '[0-9]+' | head -1 || true)
-    chromium_major=${chromium_major:-0}
-  fi
-  if (( chromium_major >= 146 )); then
-    BROWSER_MODE="own-browser"
+  if [[ -n $BROWSER_EXECUTABLE ]] && [[ -d $HOME/.config/chromium/Default || -d $HOME/.config/google-chrome/Default ]]; then
+    BROWSER_MODE="real-profile"
   else
     BROWSER_MODE="omarvis-browser"
     if [[ -z $BROWSER_EXECUTABLE ]]; then
@@ -62,8 +57,12 @@ if [[ -n $AGENT_BROWSER_PATH ]]; then
 fi
 
 echo
-echo "For access to your running Chromium, open chrome://inspect/#remote-debugging and enable remote debugging."
-echo "Chromium will show an Allow prompt on Omarvis's first browser request, followed by an automation banner."
+if [[ $BROWSER_MODE == "real-profile" ]]; then
+  echo "Omarvis will drive the browser in a separate window using a snapshot of your Default profile."
+  echo "Your logins are available there; changes in that window are not written back to your real profile."
+elif [[ $BROWSER_MODE == "omarvis-browser" ]]; then
+  echo "Omarvis will use its own browser profile under ~/.local/share/omarvis/browser-profile (separate logins)."
+fi
 
 echo "Creating the Omarvis Python environment..."
 python -m venv --system-site-packages "$VENV_DIR"
