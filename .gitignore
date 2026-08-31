@@ -1,4 +1,7 @@
 __pycache__/
+tests/harness/Commons
+tests/harness/Ui
+scratchpad/
 *.pyc
 .venv/
 .pytest_cache/

@@ -10,11 +10,12 @@ BarWidget {
   readonly property string sessionState: svc ? svc.sessionState : "idle"
   readonly property string currentMode: svc ? svc.currentMode : "agent"
   readonly property string dictationState: svc ? svc.dictationState : "idle"
+  readonly property bool dictationLocked: svc ? svc.dictationLocked : false
   readonly property string runningCommand: svc ? svc.runningCommand : ""
   readonly property string displayState: runningCommand ? "running" : (dictationState !== "idle" ? dictationState : sessionState)
   readonly property string glyphText: {
     if (sessionState === "error" || dictationState === "error") return String.fromCodePoint(0xF0026)
-    if (runningCommand) return String.fromCodePoint(0xF0493)
+    if (runningCommand) return String.fromCodePoint(0xF05B7)
     if (dictationState === "recording") return String.fromCodePoint(0xF036C)
     if (dictationState === "transcribing") return String.fromCodePoint(0xF06D7)
     if (sessionState === "thinking") return String.fromCodePoint(0xF051F)
@@ -25,9 +26,15 @@ BarWidget {
   }
   readonly property color glyphColor: {
     if (sessionState === "error" || dictationState === "error") return bar.urgent
-    if (sessionState === "idle") return Qt.darker(bar.foreground, 1.5)
+    // Hot microphone gets the bar's attention color — especially important
+    // in hands-free (tap-locked) dictation, where no held key reminds you
+    // the mic is open.
+    if (dictationState === "recording") return bar.urgent
     return bar.foreground
   }
+  // Idle reads as a concealed indicator: same 0.45 dim the stock bar
+  // indicators use, instead of a darkened color.
+  readonly property real glyphOpacity: sessionState === "idle" && dictationState === "idle" ? 0.45 : 1.0
 
   function resolveService() {
     if (!root.svc && root.bar && root.bar.shell && typeof root.bar.shell.serviceFor === "function")
@@ -37,11 +44,13 @@ BarWidget {
 
   function tooltipText() {
     var text = root.dictationState !== "idle"
-      ? "dictation: " + root.dictationState
+      ? "dictation: " + root.dictationState + (root.dictationLocked ? " (hands-free)" : "")
       : root.currentMode + ": " + root.sessionState
     if (root.svc && root.svc.lastDictation) text += "\nDictated: " + root.svc.lastDictation
     if (root.svc && root.svc.lastUser) text += "\nYou: " + root.svc.lastUser
     if (root.svc && root.svc.lastAgent) text += "\nOmarvis: " + root.svc.lastAgent
+    if (root.svc && root.svc.runningCommand) text += "\nRunning: " + root.svc.runningCommand
+    else if (root.svc && root.svc.lastCommand) text += "\nRan: " + root.svc.lastCommand
     if (root.svc && root.svc.lastError) text += "\n" + root.svc.lastError
     return text
   }
@@ -69,15 +78,11 @@ BarWidget {
       textFormat: Text.PlainText
       text: root.glyphText
       color: root.glyphColor
+      opacity: root.glyphOpacity
       font.family: root.bar.fontFamily
-      font.pixelSize: Style.font.body
+      font.pixelSize: Style.bar.iconFont
 
-      SequentialAnimation on opacity {
-        running: root.sessionState === "starting" || root.dictationState === "recording" || root.dictationState === "transcribing"
-        loops: Animation.Infinite
-        NumberAnimation { from: 1.0; to: 0.35; duration: 450 }
-        NumberAnimation { from: 0.35; to: 1.0; duration: 450 }
-      }
+      Behavior on opacity { NumberAnimation { duration: 100 } }
     }
 
     Text {

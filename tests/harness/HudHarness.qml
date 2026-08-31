@@ -33,7 +33,7 @@ ShellRoot {
     function onDictationStateChanged() { console.log("omarvis HUD harness dictation:", service.dictationState) }
     function onRunningCommandChanged() {
       if (service.runningCommand && !harness.capturedTool) {
-        console.log("omarvis HUD harness tool text:", service.hud.displayText)
+        console.log("omarvis HUD harness tool text:", service.runningCommand)
         toolCapture.restart()
       }
     }
