@@ -439,6 +439,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "herdr_announcements": True,
     "browser_mode": "unavailable",
     "agent_browser_path": "agent-browser",
+    "dictation": {
+        "language": "",
+        "cleanup": True,
+        "model_id": "scribe_v2",
+        "chunk_size": 500,
+    },
 }
 CONFIG_DIR = Path.home() / ".config" / "omarchy" / "omarvis"
 CONFIG_PATH = CONFIG_DIR / "config.json"
@@ -456,6 +462,12 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
         if not isinstance(loaded, Mapping):
             raise ValueError(f"{path} must contain a JSON object")
         config.update(loaded)
+        configured_dictation = loaded.get("dictation", {})
+        if isinstance(configured_dictation, Mapping):
+            config["dictation"] = {
+                **DEFAULT_CONFIG["dictation"],
+                **configured_dictation,
+            }
     return config
 
 

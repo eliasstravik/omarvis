@@ -11,6 +11,8 @@ Item {
   property string lastError: ""
   property string currentMode: "agent"
   property string pendingMode: ""
+  property string dictationState: "idle"
+  property string lastDictation: ""
   property bool stopRequested: false
   readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/$/, "")
 
@@ -32,6 +34,20 @@ Item {
       root.lastError = String(event.message || "Unknown error")
       root.sessionState = "error"
     }
+  }
+
+  function handleDictationEvent(line) {
+    var event
+    try {
+      event = JSON.parse(line)
+    } catch (error) {
+      console.warn("omarvis dictate: invalid event:", line)
+      return
+    }
+    if (event.event !== "dictation") return
+    root.dictationState = String(event.state || "idle")
+    if (event.text) root.lastDictation = String(event.text)
+    if (event.message) root.lastError = String(event.message)
   }
 
   function normalizeMode(mode): string {
@@ -73,6 +89,14 @@ Item {
     return root.start(requestedMode)
   }
 
+  function dictate(action): string {
+    var command = String(action || "").toLowerCase()
+    if (command !== "start" && command !== "stop") return "expected-start-or-stop"
+    if (!dictationDaemon.running) return "dictation-daemon-not-running"
+    dictationDaemon.write(command + "\n")
+    return command === "start" ? "recording" : "transcribing"
+  }
+
   Process {
     id: daemon
     command: [root.pluginDir + "/bin/omarvis-run", "--mode", root.currentMode]
@@ -97,6 +121,31 @@ Item {
     }
   }
 
+  Process {
+    id: dictationDaemon
+    command: [root.pluginDir + "/bin/omarvis-dictate"]
+    running: true
+    stdinEnabled: true
+    stdout: SplitParser {
+      onRead: data => root.handleDictationEvent(String(data))
+    }
+    stderr: SplitParser {
+      onRead: data => console.log("omarvis dictate:", data)
+    }
+    onExited: function(exitCode, exitStatus) {
+      root.dictationState = "idle"
+      if (exitCode !== 0) root.lastError = "Dictation daemon exited with code " + exitCode
+      dictationRestart.restart()
+    }
+  }
+
+  Timer {
+    id: dictationRestart
+    interval: 2000
+    repeat: false
+    onTriggered: if (!dictationDaemon.running) dictationDaemon.running = true
+  }
+
   Timer {
     id: killTimer
     interval: 8000
@@ -110,6 +159,7 @@ Item {
     function toggle(mode = "agent"): string { return root.toggle(mode) }
     function start(mode = "agent"): string { return root.start(mode) }
     function stop(): string { return root.stop() }
+    function dictate(action: string): string { return root.dictate(action) }
     function status(): string {
       return JSON.stringify({
         sessionState: root.sessionState,
@@ -117,6 +167,8 @@ Item {
         lastAgent: root.lastAgent,
         lastError: root.lastError,
         currentMode: root.currentMode,
+        dictationState: root.dictationState,
+        lastDictation: root.lastDictation,
         running: daemon.running
       })
     }

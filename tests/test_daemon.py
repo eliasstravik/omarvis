@@ -743,3 +743,19 @@ def test_main_defaults_to_agent_mode_and_accepts_ask_mode(monkeypatch):
     assert daemon.main(["--mode", "ask"]) == 0
     assert [call[2]["mode"] for call in calls] == ["agent", "agent", "ask"]
     assert calls[0] == calls[1]
+
+
+def test_load_config_deep_merges_dictation_defaults(tmp_path):
+    from omarvis.daemon import load_config
+
+    path = tmp_path / "config.json"
+    path.write_text('{"dictation":{"language":"sv"}}')
+
+    config = load_config(path)
+
+    assert config["dictation"] == {
+        "language": "sv",
+        "cleanup": True,
+        "model_id": "scribe_v2",
+        "chunk_size": 500,
+    }

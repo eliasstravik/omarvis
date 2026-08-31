@@ -10,6 +10,8 @@ VENV_DIR="$HOME/.local/share/omarvis/venv"
 BINDINGS_PATH="$HOME/.config/hypr/bindings.lua"
 AGENT_BINDING='o.bind("SUPER + CTRL + J", "Omarvis", "omarchy-shell omarvis toggle")'
 ASK_BINDING='o.bind("SUPER + SHIFT + J", "Omarvis Ask", "omarchy-shell omarvis toggle ask")'
+DICTATE_START_BINDING='o.bind("SUPER + J", "Omarvis Dictate", "omarchy-shell omarvis dictate start")'
+DICTATE_STOP_BINDING='o.bind("SUPER + J", "Omarvis Dictate Stop", "omarchy-shell omarvis dictate stop", { release = true })'
 
 need_command() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -24,6 +26,15 @@ need_command jq
 
 echo "Installing audio dependencies..."
 omarchy pkg add portaudio python-pyaudio
+
+if ! command -v wtype >/dev/null 2>&1; then
+  read -r -p "Dictation needs wtype. Install it now? [Y/n] " answer
+  if [[ -z $answer || $answer == [yY] || $answer == [yY][eE][sS] ]]; then
+    omarchy pkg add wtype
+  else
+    echo "Dictation will remain unavailable until wtype is installed." >&2
+  fi
+fi
 
 if ! command -v agent-browser >/dev/null 2>&1; then
   if command -v npm >/dev/null 2>&1; then
@@ -94,7 +105,13 @@ updated=$(jq \
     herdr_announcements: (.herdr_announcements // true),
     browser_mode: $browser_mode,
     agent_browser_path: $agent_browser_path,
-    browser_executable_path: $browser_executable_path
+    browser_executable_path: $browser_executable_path,
+    dictation: ((.dictation // {}) + {
+      language: (.dictation.language // ""),
+      cleanup: (.dictation.cleanup // true),
+      model_id: (.dictation.model_id // "scribe_v2"),
+      chunk_size: (.dictation.chunk_size // 500)
+    })
   }' <<<"$existing")
 install -m 600 /dev/null "$CONFIG_PATH"
 printf '%s\n' "$updated" >"$CONFIG_PATH"
@@ -106,10 +123,14 @@ echo
 echo "Hotkey bindings:"
 echo "$AGENT_BINDING"
 echo "$ASK_BINDING"
+echo "$DICTATE_START_BINDING"
+echo "$DICTATE_STOP_BINDING"
 missing_bindings=()
 if [[ -f $BINDINGS_PATH ]]; then
   grep -Fq 'omarchy-shell omarvis toggle")' "$BINDINGS_PATH" || missing_bindings+=("$AGENT_BINDING")
   grep -Fq 'omarchy-shell omarvis toggle ask")' "$BINDINGS_PATH" || missing_bindings+=("$ASK_BINDING")
+  grep -Fq 'omarchy-shell omarvis dictate start")' "$BINDINGS_PATH" || missing_bindings+=("$DICTATE_START_BINDING")
+  grep -Fq 'omarchy-shell omarvis dictate stop", { release = true })' "$BINDINGS_PATH" || missing_bindings+=("$DICTATE_STOP_BINDING")
 fi
 if (( ${#missing_bindings[@]} > 0 )); then
   read -r -p "Append the missing bindings to $BINDINGS_PATH? [y/N] " answer

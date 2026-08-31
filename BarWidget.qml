@@ -9,7 +9,11 @@ BarWidget {
   property var svc: null
   readonly property string sessionState: svc ? svc.sessionState : "idle"
   readonly property string currentMode: svc ? svc.currentMode : "agent"
+  readonly property string dictationState: svc ? svc.dictationState : "idle"
+  readonly property string displayState: dictationState !== "idle" ? dictationState : sessionState
   readonly property string glyphText: {
+    if (dictationState === "recording") return String.fromCodePoint(0xF036C)
+    if (dictationState === "transcribing") return String.fromCodePoint(0xF06D7)
     if (currentMode === "ask" && sessionState !== "idle") return String.fromCodePoint(0xF02D6)
     if (sessionState === "speaking") return String.fromCodePoint(0xF057E)
     if (sessionState === "idle") return String.fromCodePoint(0xF036D)
@@ -28,7 +32,10 @@ BarWidget {
   }
 
   function tooltipText() {
-    var text = root.currentMode + ": " + root.sessionState
+    var text = root.dictationState !== "idle"
+      ? "dictation: " + root.dictationState
+      : root.currentMode + ": " + root.sessionState
+    if (root.svc && root.svc.lastDictation) text += "\nDictated: " + root.svc.lastDictation
     if (root.svc && root.svc.lastUser) text += "\nYou: " + root.svc.lastUser
     if (root.svc && root.svc.lastAgent) text += "\nOmarvis: " + root.svc.lastAgent
     if (root.svc && root.svc.lastError) text += "\n" + root.svc.lastError
@@ -62,7 +69,7 @@ BarWidget {
       font.pixelSize: Style.font.body
 
       SequentialAnimation on opacity {
-        running: root.sessionState === "starting"
+        running: root.sessionState === "starting" || root.dictationState === "recording" || root.dictationState === "transcribing"
         loops: Animation.Infinite
         NumberAnimation { from: 1.0; to: 0.35; duration: 450 }
         NumberAnimation { from: 0.35; to: 1.0; duration: 450 }
@@ -73,7 +80,7 @@ BarWidget {
       anchors.verticalCenter: parent.verticalCenter
       visible: root.setting("showLabel", false)
       textFormat: Text.PlainText
-      text: root.sessionState
+      text: root.displayState
       color: root.bar.foreground
       font.family: root.bar.fontFamily
       font.pixelSize: Style.font.bodySmall
