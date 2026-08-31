@@ -159,8 +159,44 @@ def test_browser_probe_timeout_waits_for_chromium_approval_without_fallback():
         "reason": "browser-pending-approval",
     }
     assert calls == [
-        ("/opt/agent-browser", "--session", "omarvis", "--auto-connect", "tab", "list")
+        (
+            "/opt/agent-browser",
+            "--session",
+            "omarvis",
+            "--pin-tab",
+            "--idle-timeout",
+            "0",
+            "--auto-connect",
+            "tab",
+            "list",
+        )
     ]
+
+
+def test_browser_commands_disable_daemon_idle_shutdown():
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append(tuple(argv))
+        return ExecutionResult(0, "[]", "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={
+            "agent_browser_path": "/opt/agent-browser",
+            "browser_mode": "own-browser",
+        },
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+    assert handler.handle({"command": "agent-browser tab list"})["status"] == "ok"
+    assert all(
+        call[1:7]
+        == ("--session", "omarvis", "--pin-tab", "--idle-timeout", "0", "--auto-connect")
+        for call in calls
+    )
 
 
 def test_browser_tab_context_is_compact_and_omits_target_ids():

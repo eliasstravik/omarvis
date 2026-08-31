@@ -181,7 +181,16 @@ class RunToolHandler:
 
     def _browser_prefix(self) -> tuple[str, ...]:
         path = str(self.config.get("agent_browser_path") or "agent-browser")
-        common = (path, "--session", "omarvis", "--pin-tab")
+        # Keep the named daemon alive so Chrome sees one debugging session
+        # instead of requiring approval again after agent-browser's idle timeout.
+        common = (
+            path,
+            "--session",
+            "omarvis",
+            "--pin-tab",
+            "--idle-timeout",
+            "0",
+        )
         if self._browser_mode == "own-browser":
             return common + ("--auto-connect",)
         profile = os.path.expanduser(
@@ -202,7 +211,17 @@ class RunToolHandler:
             self._browser_mode = configured
             return None
         path = str(self.config.get("agent_browser_path") or "agent-browser")
-        probe_argv = (path, "--session", "omarvis", "--auto-connect", "tab", "list")
+        probe_argv = (
+            path,
+            "--session",
+            "omarvis",
+            "--pin-tab",
+            "--idle-timeout",
+            "0",
+            "--auto-connect",
+            "tab",
+            "list",
+        )
         probe = self.executor(
             probe_argv,
             timeout=15.0,
