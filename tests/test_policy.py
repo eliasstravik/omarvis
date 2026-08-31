@@ -212,12 +212,52 @@ def test_approved_herdr_commands_run(command):
         "herdr workspace close w1",
         "herdr session stop main",
         "herdr server reload-config",
-        "herdr worktree list",
         "herdr agent send-keys reviewer ctrl+c",
     ],
 )
 def test_sensitive_herdr_commands_require_confirmation(command):
     assert decide(command, catalog=omarchy_catalog()).kind == "confirm"
+
+
+def test_herdr_worktree_list_is_immediate_read_only():
+    assert decide("herdr worktree list", catalog=omarchy_catalog()).kind == "run"
+
+
+def test_session_category_approval_skips_repeatable_but_not_permanent_risks():
+    catalog = omarchy_catalog()
+
+    assert (
+        decide(
+            'herdr pane run w1:p1 "pytest"',
+            catalog=catalog,
+            approved_categories={"herdr:pane"},
+        ).kind
+        == "run"
+    )
+    assert (
+        decide(
+            "herdr pane close w1:p1",
+            catalog=catalog,
+            approved_categories={"herdr:pane"},
+        ).kind
+        == "confirm"
+    )
+    assert (
+        decide(
+            "herdr session stop main",
+            catalog=catalog,
+            approved_categories={"herdr:session"},
+        ).kind
+        == "confirm"
+    )
+    assert (
+        decide(
+            "omarchy system shutdown",
+            catalog=catalog,
+            approved_categories={"omarchy:system"},
+        ).kind
+        == "confirm"
+    )
 
 
 @pytest.mark.parametrize(

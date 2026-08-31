@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import signal
+import shlex
 import subprocess
 import sys
 import threading
@@ -24,7 +25,12 @@ from .catalog import (
     hyprland_speaks_lua,
     translate_dispatch,
 )
-from .policy import PendingConfirmation, decide
+from .policy import (
+    PendingConfirmation,
+    always_requires_confirmation,
+    confirmation_category,
+    decide,
+)
 
 
 @dataclass(frozen=True)
@@ -34,6 +40,14 @@ class ExecutionResult:
     stderr: str = ""
     timed_out: bool = False
     started: bool = False
+
+
+@dataclass(frozen=True)
+class CategoryApprovalOffer:
+    argv: tuple[str, ...]
+    category: str
+    ts: float
+    user_turns_since: int = 0
 
 
 def compact_browser_tabs(raw_payload: str, *, limit: int = 15) -> str:
@@ -130,6 +144,8 @@ class RunToolHandler:
         self.screenshot_capture = screenshot_capture
         self._condition = threading.Condition()
         self._pending: PendingConfirmation | None = None
+        self._category_offer: CategoryApprovalOffer | None = None
+        self._approved_categories: set[str] = set()
         self._hypr_lua: bool | None = None
         self._browser_mode: str | None = None
         self._browser_tab_owned = False
@@ -170,7 +186,63 @@ class RunToolHandler:
                     self._pending.ts,
                     self._pending.user_turns_since + 1,
                 )
+            if self._category_offer is not None:
+                self._category_offer = CategoryApprovalOffer(
+                    self._category_offer.argv,
+                    self._category_offer.category,
+                    self._category_offer.ts,
+                    self._category_offer.user_turns_since + 1,
+                )
             self._condition.notify_all()
+
+    def clear_session_approvals(self) -> None:
+        with self._condition:
+            self._pending = None
+            self._category_offer = None
+            self._approved_categories.clear()
+
+    def _approve_category(
+        self, command: str, *, confirmed: bool
+    ) -> dict[str, Any]:
+        try:
+            argv = tuple(shlex.split(command))
+        except ValueError:
+            argv = ()
+        with self._condition:
+            offer = self._category_offer
+            if (
+                confirmed
+                and offer is not None
+                and offer.argv == argv
+                and self.clock() - offer.ts <= 30
+                and offer.user_turns_since > 0
+            ):
+                self._approved_categories.add(offer.category)
+                self._category_offer = None
+                return {
+                    "status": "category_approved",
+                    "category": offer.category,
+                }
+        return {
+            "status": "rejected",
+            "reason": "A fresh user confirmation is required to approve this category.",
+        }
+
+    def _set_category_offer(
+        self, argv: tuple[str, ...], category: str | None
+    ) -> dict[str, Any]:
+        if category is None or always_requires_confirmation(argv):
+            return {}
+        with self._condition:
+            self._category_offer = CategoryApprovalOffer(
+                argv=argv,
+                category=category,
+                ts=self.clock(),
+            )
+        return {
+            "confirmation_category": category,
+            "can_approve_category": True,
+        }
 
     def _pending_for_decision(self, confirmed: bool) -> PendingConfirmation | None:
         with self._condition:
@@ -351,14 +423,20 @@ class RunToolHandler:
         try:
             command = str(parameters.get("command", ""))
             confirmed = parameters.get("confirmed") is True
+            if parameters.get("approve_category") is True:
+                return self._approve_category(command, confirmed=confirmed)
+            pending = self._pending_for_decision(confirmed)
+            with self._condition:
+                approved_categories = frozenset(self._approved_categories)
             decision = decide(
                 command,
                 catalog=self.catalog,
                 dispatchers=self.dispatchers,
                 confirmed=confirmed,
-                pending=self._pending_for_decision(confirmed),
+                pending=pending,
                 now=self.clock(),
                 scope=self.scope,
+                approved_categories=approved_categories,
             )
             if decision.kind == "reject":
                 return {"status": "rejected", "reason": decision.reason}
@@ -368,6 +446,15 @@ class RunToolHandler:
                 return {"status": "needs_confirmation", "command": command}
             with self._condition:
                 self._pending = None
+            confirmed_category = None
+            if (
+                confirmed
+                and pending is not None
+                and pending.argv == decision.argv
+                and pending.user_turns_since > 0
+                and self.clock() - pending.ts <= 30
+            ):
+                confirmed_category = confirmation_category(decision.argv)
             if decision.argv == ("omarvis", "see"):
                 return self._handle_vision()
             execution_argv = decision.argv
@@ -416,7 +503,11 @@ class RunToolHandler:
             if result.started:
                 if self.event_sink is not None:
                     self.event_sink({"event": "ran", "command": command, "exit": None})
-                return {"status": "started", "command": command}
+                response = {"status": "started", "command": command}
+                response.update(
+                    self._set_category_offer(decision.argv, confirmed_category)
+                )
+                return response
             if result.exit_code == 0 and decision.argv[:1] == ("agent-browser",):
                 if (
                     decision.argv[1:2] == ("open",) and not self._browser_tab_owned
@@ -461,6 +552,10 @@ class RunToolHandler:
                 "stdout": stdout[:stdout_limit],
                 "stderr": result.stderr[:200],
             }
+            if succeeded:
+                response.update(
+                    self._set_category_offer(decision.argv, confirmed_category)
+                )
             if not succeeded and decision.argv[:2] == ("hyprctl", "dispatch"):
                 response["stdout"] = clean_hypr_error(stdout)[:stdout_limit]
                 if self.state_provider is not None:
@@ -484,6 +579,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "herdr_announcements": True,
     "browser_mode": "unavailable",
     "agent_browser_path": "agent-browser",
+    "screenshot_cache_max_age_seconds": 86_400,
     "profile_path": "~/.config/omarchy/omarvis/profile.md",
     "dictation": {
         "language": "",
@@ -536,6 +632,28 @@ def load_api_key(path: Path = API_KEY_PATH) -> str:
     if value:
         return value
     return path.read_text().strip() if path.exists() else ""
+
+
+def sweep_screenshot_cache(
+    config: Mapping[str, Any], *, now: float | None = None
+) -> int:
+    cache_dir = Path(
+        os.path.expanduser(str(config.get("cache_dir") or "~/.cache/omarvis"))
+    )
+    if not cache_dir.is_dir():
+        return 0
+    cutoff = (time.time() if now is None else now) - float(
+        config.get("screenshot_cache_max_age_seconds", 86_400)
+    )
+    removed = 0
+    for path in cache_dir.glob("screenshot-*.png"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 class Notifier:
@@ -858,6 +976,7 @@ def run_session(
         if watcher is not None:
             watcher.join(5.0)
         emit_state("idle")
+        handler.clear_session_approvals()
     return 0
 
 
@@ -872,6 +991,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return list_devices()
     try:
         config = load_config()
+        sweep_screenshot_cache(config)
         agent_key = "ask_agent_id" if arguments.mode == "ask" else "agent_id"
         if not config.get(agent_key):
             message = (

@@ -840,3 +840,105 @@ def test_omarvis_see_is_clear_when_vision_is_unconfigured():
 
     assert result["status"] == "unavailable"
     assert "Vision is not configured" in result["reason"]
+
+
+def test_category_approval_is_fresh_scoped_and_cleared_with_the_session():
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append(tuple(argv))
+        return ExecutionResult(0, "{}", "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        executor=executor,
+        confirmation_wait=0,
+    )
+    first_command = 'herdr pane run w1:p1 "pytest"'
+    second_command = 'herdr pane run w1:p1 "pytest -q"'
+
+    assert handler.handle({"command": first_command})["status"] == "needs_confirmation"
+    handler.note_user_transcript("yes")
+    confirmed = handler.handle({"command": first_command, "confirmed": True})
+    assert confirmed["status"] == "ok"
+    assert confirmed["confirmation_category"] == "herdr:pane"
+    assert confirmed["can_approve_category"] is True
+
+    premature = handler.handle(
+        {
+            "command": first_command,
+            "confirmed": True,
+            "approve_category": True,
+        }
+    )
+    assert premature["status"] == "rejected"
+
+    handler.note_user_transcript("yes, stop asking this session")
+    approved = handler.handle(
+        {
+            "command": first_command,
+            "confirmed": True,
+            "approve_category": True,
+        }
+    )
+    assert approved == {
+        "status": "category_approved",
+        "category": "herdr:pane",
+    }
+    assert handler.handle({"command": second_command})["status"] == "ok"
+
+    handler.clear_session_approvals()
+    assert handler.handle({"command": second_command})["status"] == "needs_confirmation"
+    assert calls == [
+        ("herdr", "pane", "run", "w1:p1", "pytest"),
+        ("herdr", "pane", "run", "w1:p1", "pytest -q"),
+    ]
+
+
+def test_permanently_gated_close_never_offers_category_approval():
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        executor=lambda argv, **_options: ExecutionResult(0, "{}", ""),
+        confirmation_wait=0,
+    )
+    command = "herdr pane close w1:p1"
+
+    assert handler.handle({"command": command})["status"] == "needs_confirmation"
+    handler.note_user_transcript("yes")
+    result = handler.handle({"command": command, "confirmed": True})
+
+    assert result["status"] == "ok"
+    assert "can_approve_category" not in result
+
+
+def test_screenshot_cache_sweep_only_ages_out_owned_pngs(tmp_path):
+    import os
+
+    from omarvis.daemon import sweep_screenshot_cache
+
+    old = tmp_path / "screenshot-old.png"
+    fresh = tmp_path / "screenshot-fresh.png"
+    unrelated = tmp_path / "catalog-old.json"
+    old.write_bytes(b"old")
+    fresh.write_bytes(b"fresh")
+    unrelated.write_text("keep")
+    os.utime(old, (100.0, 100.0))
+    os.utime(fresh, (950.0, 950.0))
+    os.utime(unrelated, (100.0, 100.0))
+
+    removed = sweep_screenshot_cache(
+        {
+            "cache_dir": str(tmp_path),
+            "screenshot_cache_max_age_seconds": 100,
+        },
+        now=1000.0,
+    )
+
+    assert removed == 1
+    assert not old.exists()
+    assert fresh.exists()
+    assert unrelated.exists()

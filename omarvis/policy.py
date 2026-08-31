@@ -67,9 +67,10 @@ HERDR_CONFIRM = frozenset(
         ("session", "delete"),
         ("server", "stop"),
         ("server", "reload-config"),
-        *(("worktree", command) for command in ("list", "create", "open", "remove")),
+        *(("worktree", command) for command in ("create", "open", "remove")),
     }
 )
+HERDR_IMMEDIATE = HERDR_IMMEDIATE | frozenset({("worktree", "list")})
 HERDR_ALLOW = HERDR_IMMEDIATE | HERDR_CONFIRM
 
 BROWSER_SINGLE_ALLOW = frozenset(
@@ -155,6 +156,42 @@ class PendingConfirmation:
     user_turns_since: int = 0
 
 
+def confirmation_category(argv: tuple[str, ...]) -> str | None:
+    if not argv:
+        return None
+    if argv[0] == "omarchy" and len(argv) > 1:
+        return f"omarchy:{argv[1]}"
+    if argv[0] == "herdr" and len(argv) > 1:
+        if argv[1:3] in {("agent", "send-keys"), ("pane", "send-keys")}:
+            return "herdr:control-keys"
+        return f"herdr:{argv[1]}"
+    if argv[0] == "agent-browser" and len(argv) > 1:
+        return f"browser:{argv[1]}"
+    if argv[:3] == ("hyprctl", "dispatch", "exit"):
+        return "system:power"
+    return None
+
+
+def always_requires_confirmation(argv: tuple[str, ...]) -> bool:
+    if any(token in {"close", "delete", "remove"} for token in argv[1:]):
+        return True
+    if argv[:3] in {
+        ("herdr", "session", "stop"),
+        ("herdr", "session", "delete"),
+        ("herdr", "server", "stop"),
+    }:
+        return True
+    if argv[:3] == ("hyprctl", "dispatch", "exit"):
+        return True
+    return argv[:3] in {
+        ("omarchy", "system", "shutdown"),
+        ("omarchy", "system", "reboot"),
+        ("omarchy", "system", "logout"),
+        ("omarchy", "system", "suspend"),
+        ("omarchy", "system", "hibernate"),
+    }
+
+
 def _omarchy_requires_confirmation(
     argv: tuple[str, ...], route: tuple[str, ...]
 ) -> bool:
@@ -202,7 +239,15 @@ def _confirmation_decision(
     confirmed: bool,
     pending: PendingConfirmation | None,
     now: float,
+    approved_categories: frozenset[str],
 ) -> Decision:
+    category = confirmation_category(argv)
+    if (
+        category is not None
+        and category in approved_categories
+        and not always_requires_confirmation(argv)
+    ):
+        return Decision("run", argv)
     if (
         confirmed
         and pending is not None
@@ -221,6 +266,7 @@ def _decide_herdr(
     confirmed: bool,
     pending: PendingConfirmation | None,
     now: float,
+    approved_categories: frozenset[str],
 ) -> Decision:
     if len(argv) < 2:
         return Decision("reject", reason="bare herdr is not allowed")
@@ -243,6 +289,7 @@ def _decide_herdr(
             confirmed=confirmed,
             pending=pending,
             now=now,
+            approved_categories=approved_categories,
         )
     return Decision("run", argv)
 
@@ -308,6 +355,7 @@ def _decide_browser(
     confirmed: bool,
     pending: PendingConfirmation | None,
     now: float,
+    approved_categories: frozenset[str],
 ) -> Decision:
     matched = _browser_route(argv)
     if matched is None:
@@ -335,6 +383,7 @@ def _decide_browser(
             confirmed=confirmed,
             pending=pending,
             now=now,
+            approved_categories=approved_categories,
         )
     return Decision("run", argv)
 
@@ -376,6 +425,7 @@ def _decide_ask(
                 confirmed=False,
                 pending=None,
                 now=time.monotonic(),
+                approved_categories=frozenset(),
             )
             if decision.kind == "run":
                 return decision
@@ -395,7 +445,9 @@ def decide(
     now: float | None = None,
     dispatchers: set[str] | frozenset[str] = frozenset(),
     scope: str = "agent",
+    approved_categories: set[str] | frozenset[str] = frozenset(),
 ) -> Decision:
+    approved = frozenset(approved_categories)
     if any(character in command for character in ("\n", "\r", "\0")):
         return Decision("reject", reason="control character")
     if len(command) > 2000:
@@ -432,6 +484,7 @@ def decide(
                     confirmed=confirmed,
                     pending=pending,
                     now=time.monotonic() if now is None else now,
+                    approved_categories=approved,
                 )
             return Decision("run", argv)
     if argv[0] == "hyprctl":
@@ -446,6 +499,7 @@ def decide(
                 confirmed=confirmed,
                 pending=pending,
                 now=time.monotonic() if now is None else now,
+                approved_categories=approved,
             )
         return Decision("run", argv)
     if argv[0] == "herdr":
@@ -455,6 +509,7 @@ def decide(
             confirmed=confirmed,
             pending=pending,
             now=time.monotonic() if now is None else now,
+            approved_categories=approved,
         )
     if argv[0] == "agent-browser":
         return _decide_browser(
@@ -463,5 +518,6 @@ def decide(
             confirmed=confirmed,
             pending=pending,
             now=time.monotonic() if now is None else now,
+            approved_categories=approved,
         )
     return Decision("reject", reason="unknown route")

@@ -64,6 +64,10 @@ def conversation_payload(prompt: str, llm: str) -> dict[str, Any]:
                                     "type": "boolean",
                                     "description": "True only after the user explicitly confirms the exact pending command.",
                                 },
+                                "approve_category": {
+                                    "type": "boolean",
+                                    "description": "True only after a confirmed command offered category approval and the user explicitly agreed in a later turn.",
+                                },
                             },
                         },
                     }
@@ -87,7 +91,7 @@ def manual_steps() -> str:
 - Turn timeout: 20 seconds. Silence end-call timeout: 30 seconds. Maximum duration: 300 seconds.
 - Enable the `end_call` system tool.
 - Add a Client tool named `run` with Wait for response enabled and a 35-second response timeout.
-- `run` parameters: required string `command`; optional boolean `confirmed`.
+- `run` parameters: required string `command`; optional booleans `confirmed` and `approve_category`.
 - Declare command_catalog, hyprland_dispatchers, herdr_catalog, browser_catalog, current_state, and profile as dynamic variables.
 Store both IDs as agent_id and ask_agent_id in ~/.config/omarchy/omarvis/config.json."""
 

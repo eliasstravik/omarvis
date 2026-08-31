@@ -13,6 +13,7 @@ AGENT_BINDING='o.bind("SUPER + CTRL + J", "Omarvis", "omarchy-shell omarvis togg
 ASK_BINDING='o.bind("SUPER + SHIFT + J", "Omarvis Ask", "omarchy-shell omarvis toggle ask")'
 DICTATE_START_BINDING='o.bind("SUPER + J", "Omarvis Dictate", "omarchy-shell omarvis dictate start")'
 DICTATE_STOP_BINDING='o.bind("SUPER + J", "Omarvis Dictate Stop", "omarchy-shell omarvis dictate stop", { release = true })'
+TEXT_BINDING='o.bind("SUPER + ALT + J", "Omarvis Text", "'"$PLUGIN_DIR"'/bin/omarvis-text")'
 
 need_command() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -107,6 +108,7 @@ updated=$(jq \
     browser_mode: $browser_mode,
     agent_browser_path: $agent_browser_path,
     profile_path: (.profile_path // "~/.config/omarchy/omarvis/profile.md"),
+    screenshot_cache_max_age_seconds: (.screenshot_cache_max_age_seconds // 86400),
     browser_executable_path: $browser_executable_path,
     dictation: ((.dictation // {}) + {
       language: (.dictation.language // ""),
@@ -146,12 +148,14 @@ echo "$AGENT_BINDING"
 echo "$ASK_BINDING"
 echo "$DICTATE_START_BINDING"
 echo "$DICTATE_STOP_BINDING"
+echo "$TEXT_BINDING"
 missing_bindings=()
 if [[ -f $BINDINGS_PATH ]]; then
   grep -Fq 'omarchy-shell omarvis toggle")' "$BINDINGS_PATH" || missing_bindings+=("$AGENT_BINDING")
   grep -Fq 'omarchy-shell omarvis toggle ask")' "$BINDINGS_PATH" || missing_bindings+=("$ASK_BINDING")
   grep -Fq 'omarchy-shell omarvis dictate start")' "$BINDINGS_PATH" || missing_bindings+=("$DICTATE_START_BINDING")
   grep -Fq 'omarchy-shell omarvis dictate stop", { release = true })' "$BINDINGS_PATH" || missing_bindings+=("$DICTATE_STOP_BINDING")
+  grep -Fq '/bin/omarvis-text")' "$BINDINGS_PATH" || missing_bindings+=("$TEXT_BINDING")
 fi
 if (( ${#missing_bindings[@]} > 0 )); then
   read -r -p "Append the missing bindings to $BINDINGS_PATH? [y/N] " answer
