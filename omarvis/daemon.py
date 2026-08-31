@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import signal
+import shlex
 import subprocess
 import sys
 import threading
@@ -24,7 +25,12 @@ from .catalog import (
     hyprland_speaks_lua,
     translate_dispatch,
 )
-from .policy import PendingConfirmation, decide
+from .policy import (
+    PendingConfirmation,
+    always_requires_confirmation,
+    confirmation_category,
+    decide,
+)
 
 
 @dataclass(frozen=True)
@@ -34,6 +40,14 @@ class ExecutionResult:
     stderr: str = ""
     timed_out: bool = False
     started: bool = False
+
+
+@dataclass(frozen=True)
+class CategoryApprovalOffer:
+    argv: tuple[str, ...]
+    category: str
+    ts: float
+    user_turns_since: int = 0
 
 
 def compact_browser_tabs(raw_payload: str, *, limit: int = 15) -> str:
@@ -111,6 +125,8 @@ class RunToolHandler:
         event_sink: Callable[[Mapping[str, Any]], None] | None = None,
         state_provider: Callable[[], str] | None = None,
         state_refresh_delay: float = 2.0,
+        scope: str = "agent",
+        screenshot_sender: Callable[[], str] | None = None,
     ) -> None:
         self.catalog = catalog
         self.dispatchers = frozenset(dispatchers)
@@ -122,12 +138,17 @@ class RunToolHandler:
         self.event_sink = event_sink
         self.state_provider = state_provider
         self.state_refresh_delay = state_refresh_delay
+        self.scope = scope
+        self.screenshot_sender = screenshot_sender
         self._condition = threading.Condition()
         self._pending: PendingConfirmation | None = None
+        self._category_offer: CategoryApprovalOffer | None = None
+        self._approved_categories: set[str] = set()
         self._hypr_lua: bool | None = None
         self._browser_mode: str | None = None
         self._browser_tab_owned = False
         self._refresh_thread: threading.Thread | None = None
+        self._pending_screenshots: dict[str, str] = {}
 
     def _execute_default(
         self,
@@ -164,7 +185,64 @@ class RunToolHandler:
                     self._pending.ts,
                     self._pending.user_turns_since + 1,
                 )
+            if self._category_offer is not None:
+                self._category_offer = CategoryApprovalOffer(
+                    self._category_offer.argv,
+                    self._category_offer.category,
+                    self._category_offer.ts,
+                    self._category_offer.user_turns_since + 1,
+                )
             self._condition.notify_all()
+
+    def clear_session_approvals(self) -> None:
+        with self._condition:
+            self._pending = None
+            self._category_offer = None
+            self._approved_categories.clear()
+            self._pending_screenshots.clear()
+
+    def _approve_category(
+        self, command: str, *, confirmed: bool
+    ) -> dict[str, Any]:
+        try:
+            argv = tuple(shlex.split(command))
+        except ValueError:
+            argv = ()
+        with self._condition:
+            offer = self._category_offer
+            if (
+                confirmed
+                and offer is not None
+                and offer.argv == argv
+                and self.clock() - offer.ts <= 30
+                and offer.user_turns_since > 0
+            ):
+                self._approved_categories.add(offer.category)
+                self._category_offer = None
+                return {
+                    "status": "category_approved",
+                    "category": offer.category,
+                }
+        return {
+            "status": "rejected",
+            "reason": "A fresh user confirmation is required to approve this category.",
+        }
+
+    def _set_category_offer(
+        self, argv: tuple[str, ...], category: str | None
+    ) -> dict[str, Any]:
+        if category is None or always_requires_confirmation(argv):
+            return {}
+        with self._condition:
+            self._category_offer = CategoryApprovalOffer(
+                argv=argv,
+                category=category,
+                ts=self.clock(),
+            )
+        return {
+            "confirmation_category": category,
+            "can_approve_category": True,
+        }
 
     def _pending_for_decision(self, confirmed: bool) -> PendingConfirmation | None:
         with self._condition:
@@ -198,14 +276,26 @@ class RunToolHandler:
             # window from a snapshot copy of that profile: logins carry over,
             # nothing is written back, and no debugging consent prompt appears.
             profile_name = str(self.config.get("browser_profile") or "Default")
-            return common + ("--profile", profile_name, "--headed")
+            return common + (
+                "--profile",
+                profile_name,
+                "--args",
+                "--no-startup-window",
+                "--headed",
+            )
         profile = os.path.expanduser(
             str(
                 self.config.get("browser_profile")
                 or "~/.local/share/omarvis/browser-profile"
             )
         )
-        return common + ("--profile", profile, "--headed")
+        return common + (
+            "--profile",
+            profile,
+            "--args",
+            "--no-startup-window",
+            "--headed",
+        )
 
     def _probe_browser(self) -> dict[str, Any] | None:
         if self._browser_mode is not None:
@@ -259,7 +349,11 @@ class RunToolHandler:
         if error is not None:
             return None, error
         command = argv[1:]
-        if command[:1] == ("open",) and not self._browser_tab_owned:
+        if (
+            command[:1] == ("open",)
+            and not self._browser_tab_owned
+            and self._browser_mode == "own-browser"
+        ):
             command = ("tab", "new", *command[1:])
         if command[:1] == ("screenshot",):
             cache_dir = os.path.expanduser(
@@ -302,17 +396,47 @@ class RunToolHandler:
         self._refresh_thread = threading.Thread(target=push, daemon=True)
         self._refresh_thread.start()
 
+    def _handle_screenshot(self, tool_call_id: str) -> dict[str, Any]:
+        if self.screenshot_sender is None:
+            return {
+                "status": "unavailable",
+                "reason": "Screenshot delivery requires an active ElevenLabs conversation.",
+            }
+        try:
+            file_id = self.screenshot_sender().strip()
+            if not file_id:
+                raise RuntimeError("ElevenLabs screenshot upload returned no file ID")
+            with self._condition:
+                self._pending_screenshots[tool_call_id] = file_id
+            return {
+                "status": "screenshot_uploaded",
+                "message": "The screenshot will arrive as the next ElevenLabs user turn.",
+            }
+        except Exception as error:  # noqa: BLE001 - tool errors become tool text
+            return {"status": "failed", "reason": str(error)}
+
+    def take_pending_screenshot(self, tool_call_id: str) -> str | None:
+        with self._condition:
+            return self._pending_screenshots.pop(tool_call_id, None)
+
     def handle(self, parameters: Mapping[str, Any]) -> dict[str, Any]:
         try:
             command = str(parameters.get("command", ""))
             confirmed = parameters.get("confirmed") is True
+            if parameters.get("approve_category") is True:
+                return self._approve_category(command, confirmed=confirmed)
+            pending = self._pending_for_decision(confirmed)
+            with self._condition:
+                approved_categories = frozenset(self._approved_categories)
             decision = decide(
                 command,
                 catalog=self.catalog,
                 dispatchers=self.dispatchers,
                 confirmed=confirmed,
-                pending=self._pending_for_decision(confirmed),
+                pending=pending,
                 now=self.clock(),
+                scope=self.scope,
+                approved_categories=approved_categories,
             )
             if decision.kind == "reject":
                 return {"status": "rejected", "reason": decision.reason}
@@ -322,7 +446,29 @@ class RunToolHandler:
                 return {"status": "needs_confirmation", "command": command}
             with self._condition:
                 self._pending = None
-            execution_argv = decision.argv
+            confirmed_category = None
+            if (
+                confirmed
+                and pending is not None
+                and pending.argv == decision.argv
+                and pending.user_turns_since > 0
+                and self.clock() - pending.ts <= 30
+            ):
+                confirmed_category = confirmation_category(decision.argv)
+            if decision.argv == ("omarvis", "see"):
+                return self._handle_screenshot(
+                    str(parameters.get("tool_call_id") or "")
+                )
+            effective_argv = decision.argv
+            if decision.argv == ("omarchy", "launch", "browser") and str(
+                self.config.get("browser_mode", "unavailable")
+            ) != "unavailable":
+                effective_argv = (
+                    ("agent-browser", "tab", "new")
+                    if self.config.get("browser_mode") == "own-browser"
+                    else ("agent-browser", "open", "about:blank")
+                )
+            execution_argv = effective_argv
             timeout = 3.0
             kill_on_timeout = False
             stdout_limit = 400
@@ -337,15 +483,15 @@ class RunToolHandler:
                 self._hyprland_speaks_lua()
             ):
                 execution_argv = translate_dispatch(decision.argv)
-            if decision.argv[:1] == ("agent-browser",):
-                prepared, error = self._prepare_browser(decision.argv)
+            if effective_argv[:1] == ("agent-browser",):
+                prepared, error = self._prepare_browser(effective_argv)
                 if error is not None:
                     return error
                 assert prepared is not None
                 execution_argv = prepared
                 timeout = 30.0
                 kill_on_timeout = True
-                stdout_limit = 6000 if decision.argv[1:2] == ("snapshot",) else 3000
+                stdout_limit = 6000 if effective_argv[1:2] == ("snapshot",) else 3000
                 execution_stdout_limit = stdout_limit
             result = self.executor(
                 execution_argv,
@@ -368,13 +514,22 @@ class RunToolHandler:
             if result.started:
                 if self.event_sink is not None:
                     self.event_sink({"event": "ran", "command": command, "exit": None})
-                return {"status": "started", "command": command}
-            if result.exit_code == 0 and decision.argv[:1] == ("agent-browser",):
+                response = {"status": "started", "command": command}
+                response.update(
+                    self._set_category_offer(decision.argv, confirmed_category)
+                )
+                return response
+            if result.exit_code == 0 and effective_argv[:1] == ("agent-browser",):
                 if (
-                    decision.argv[1:2] == ("open",) and not self._browser_tab_owned
-                ) or decision.argv[1:3] == ("tab", "new"):
+                    effective_argv[1:2] == ("open",) and not self._browser_tab_owned
+                ) or effective_argv[1:3] == ("tab", "new"):
                     self._browser_tab_owned = True
-                elif decision.argv[1:2] == ("tab",) and decision.argv[2:3] not in {
+                elif effective_argv[1:3] == ("tab", "list") and self._browser_mode in {
+                    "real-profile",
+                    "omarvis-browser",
+                }:
+                    self._browser_tab_owned = True
+                elif effective_argv[1:2] == ("tab",) and effective_argv[2:3] not in {
                     ("list",),
                     ("new",),
                 }:
@@ -413,6 +568,10 @@ class RunToolHandler:
                 "stdout": stdout[:stdout_limit],
                 "stderr": result.stderr[:200],
             }
+            if succeeded:
+                response.update(
+                    self._set_category_offer(decision.argv, confirmed_category)
+                )
             if not succeeded and decision.argv[:2] == ("hyprctl", "dispatch"):
                 response["stdout"] = clean_hypr_error(stdout)[:stdout_limit]
                 if self.state_provider is not None:
@@ -430,11 +589,20 @@ class RunToolHandler:
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "agent_id": "",
+    "ask_agent_id": "",
     "llm": "gpt-5.6-sol",
     "input_device_index": None,
     "herdr_announcements": True,
     "browser_mode": "unavailable",
     "agent_browser_path": "agent-browser",
+    "screenshot_cache_max_age_seconds": 86_400,
+    "profile_path": "~/.config/omarchy/omarvis/profile.md",
+    "dictation": {
+        "language": "",
+        "cleanup": True,
+        "model_id": "scribe_v2",
+        "chunk_size": 500,
+    },
 }
 CONFIG_DIR = Path.home() / ".config" / "omarchy" / "omarvis"
 CONFIG_PATH = CONFIG_DIR / "config.json"
@@ -451,7 +619,15 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
         loaded = json.loads(path.read_text())
         if not isinstance(loaded, Mapping):
             raise ValueError(f"{path} must contain a JSON object")
+        loaded = dict(loaded)
+        loaded.pop("vision", None)
         config.update(loaded)
+        configured_dictation = loaded.get("dictation", {})
+        if isinstance(configured_dictation, Mapping):
+            config["dictation"] = {
+                **DEFAULT_CONFIG["dictation"],
+                **configured_dictation,
+            }
     return config
 
 
@@ -462,11 +638,37 @@ def load_api_key(path: Path = API_KEY_PATH) -> str:
     return path.read_text().strip() if path.exists() else ""
 
 
+def sweep_screenshot_cache(
+    config: Mapping[str, Any], *, now: float | None = None
+) -> int:
+    cache_dir = Path(
+        os.path.expanduser(str(config.get("cache_dir") or "~/.cache/omarvis"))
+    )
+    if not cache_dir.is_dir():
+        return 0
+    cutoff = (time.time() if now is None else now) - float(
+        config.get("screenshot_cache_max_age_seconds", 86_400)
+    )
+    removed = 0
+    for path in cache_dir.glob("screenshot-*.png"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def initial_session_notification(text_only: bool) -> str:
+    return "Processing text command" if text_only else "Listening"
+
+
 class Notifier:
     def __init__(self) -> None:
         self.notification_id = ""
 
-    def start(self) -> None:
+    def start(self, description: str = "Listening") -> None:
         try:
             completed = subprocess.run(
                 [
@@ -475,7 +677,7 @@ class Notifier:
                     "-g",
                     chr(0xF130),
                     "Omarvis",
-                    "Listening",
+                    description,
                 ],
                 capture_output=True,
                 text=True,
@@ -662,8 +864,41 @@ def wait_for_conversation_connection(
     raise RuntimeError("Timed out waiting for ElevenLabs to connect")
 
 
+SCREENSHOT_FOLLOWUP = (
+    "This current desktop screenshot was requested by the preceding user question. "
+    "Inspect the attached image and answer that question directly."
+)
+
+
+def send_tool_result_then_screenshot(
+    response: Mapping[str, Any],
+    parameters: Mapping[str, Any],
+    handler: RunToolHandler,
+    *,
+    send_response: Callable[[Mapping[str, Any]], None],
+    send_multimodal: Callable[..., None],
+    error_sink: Callable[[str], None] | None = None,
+) -> None:
+    """Preserve protocol ordering: tool result first, screenshot user turn second."""
+    send_response(response)
+    tool_call_id = str(parameters.get("tool_call_id") or "")
+    file_id = handler.take_pending_screenshot(tool_call_id)
+    if file_id is None:
+        return
+    try:
+        send_multimodal(text=SCREENSHOT_FOLLOWUP, file_id=file_id)
+    except Exception as error:  # noqa: BLE001 - keep the tool callback thread alive
+        if error_sink is not None:
+            error_sink(str(error))
+
+
 def run_session(
-    config: Mapping[str, Any], api_key: str, *, text_only: bool, messages: Sequence[str]
+    config: Mapping[str, Any],
+    api_key: str,
+    *,
+    text_only: bool,
+    messages: Sequence[str],
+    mode: str = "agent",
 ) -> int:
     from elevenlabs import ElevenLabs
     from elevenlabs.conversational_ai.conversation import (
@@ -678,11 +913,15 @@ def run_session(
         desktop_state,
         load_catalog,
     )
+    from .screenshot import capture_and_upload_screenshot
 
     stop_requested = threading.Event()
     session_ended = threading.Event()
     contextual_updates: queue.Queue[str] = queue.Queue()
     notifier = Notifier()
+
+    def emit_state(state: str) -> None:
+        emit_event({"event": "state", "state": state, "mode": mode})
 
     def request_stop(_signum: int, _frame: Any) -> None:
         stop_requested.set()
@@ -698,6 +937,20 @@ def run_session(
         if event.get("event") == "ran":
             notifier.update("Omarvis", f"Ran: {event.get('command', 'command')}")
 
+    client = ElevenLabs(api_key=api_key)
+    conversation_holder: dict[str, Any] = {}
+
+    def upload_screenshot() -> str:
+        conversation = conversation_holder.get("conversation")
+        conversation_id = str(
+            getattr(conversation, "_conversation_id", "") or ""
+        )
+        return capture_and_upload_screenshot(
+            client,
+            conversation_id,
+            config,
+        )
+
     handler = RunToolHandler(
         catalog=catalog,
         dispatchers=HYPR_DISPATCHERS,
@@ -705,20 +958,50 @@ def run_session(
         context_sink=contextual_updates.put,
         event_sink=on_tool_event,
         state_provider=desktop_state,
+        scope=mode,
+        screenshot_sender=upload_screenshot,
     )
-    client_tools = ClientTools()
+
+    class ScreenshotClientTools(ClientTools):
+        def execute_tool(
+            self,
+            tool_name: str,
+            parameters: dict[str, Any],
+            callback: Callable[[dict[str, Any]], None],
+        ) -> None:
+            def ordered_callback(response: dict[str, Any]) -> None:
+                conversation = conversation_holder.get("conversation")
+                send_tool_result_then_screenshot(
+                    response,
+                    parameters,
+                    handler,
+                    send_response=callback,
+                    send_multimodal=conversation.send_multimodal_message,
+                    error_sink=lambda message: emit_event(
+                        {
+                            "event": "error",
+                            "message": f"Screenshot delivery failed: {message}",
+                        }
+                    ),
+                )
+
+            super().execute_tool(tool_name, parameters, ordered_callback)
+
+    client_tools = ScreenshotClientTools()
     client_tools.register("run", handler.handle_client_tool)
 
     def on_user(text: str) -> None:
         handler.note_user_transcript(text)
-        emit_event({"event": "state", "state": "listening"})
+        emit_state("listening")
         emit_event({"event": "user", "text": text})
         notifier.update("You", text)
 
     def on_agent(text: str) -> None:
-        emit_event({"event": "state", "state": "speaking"})
+        emit_state("speaking")
         emit_event({"event": "agent", "text": text})
         notifier.update("Omarvis", text)
+        if text_only:
+            session_ended.set()
 
     def on_end(*_args: Any) -> None:
         session_ended.set()
@@ -729,8 +1012,8 @@ def run_session(
         else _selected_audio_interface(config.get("input_device_index"))
     )
     conversation = Conversation(
-        client=ElevenLabs(api_key=api_key),
-        agent_id=str(config["agent_id"]),
+        client=client,
+        agent_id=str(config["ask_agent_id"] if mode == "ask" else config["agent_id"]),
         requires_auth=True,
         audio_interface=audio_interface,
         config=ConversationInitiationData(dynamic_variables=variables),
@@ -739,8 +1022,9 @@ def run_session(
         callback_agent_response=on_agent,
         callback_end_session=on_end,
     )
-    notifier.start()
-    emit_event({"event": "state", "state": "starting"})
+    conversation_holder["conversation"] = conversation
+    notifier.start(initial_session_notification(text_only))
+    emit_state("starting")
     if stop_requested.is_set():
         return 0
     conversation.start_session()
@@ -754,7 +1038,7 @@ def run_session(
                 daemon=True,
             )
             watcher.start()
-        emit_event({"event": "state", "state": "listening"})
+        emit_state("listening")
         for message in messages:
             conversation.send_user_message(message)
         while not stop_requested.is_set() and not session_ended.is_set():
@@ -772,7 +1056,8 @@ def run_session(
         teardown.join(5.0)
         if watcher is not None:
             watcher.join(5.0)
-        emit_event({"event": "state", "state": "idle"})
+        emit_state("idle")
+        handler.clear_session_approvals()
     return 0
 
 
@@ -781,16 +1066,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--list-devices", action="store_true")
     parser.add_argument("--text-only", action="store_true")
     parser.add_argument("--message", action="append", default=[])
+    parser.add_argument("--mode", choices=("agent", "ask"), default="agent")
     arguments = parser.parse_args(argv)
     if arguments.list_devices:
         return list_devices()
     try:
         config = load_config()
-        if not config.get("agent_id"):
+        sweep_screenshot_cache(config)
+        agent_key = "ask_agent_id" if arguments.mode == "ask" else "agent_id"
+        if not config.get(agent_key):
+            message = (
+                "Omarvis is not provisioned. Run bin/omarvis-setup."
+                if arguments.mode == "agent"
+                else "Omarvis ask mode is not provisioned. Run bin/omarvis-setup."
+            )
             emit_event(
                 {
                     "event": "error",
-                    "message": "Omarvis is not provisioned. Run bin/omarvis-setup.",
+                    "message": message,
                 }
             )
             return 2
@@ -804,7 +1097,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
         return run_session(
-            config, api_key, text_only=arguments.text_only, messages=arguments.message
+            config,
+            api_key,
+            text_only=arguments.text_only,
+            messages=arguments.message,
+            mode=arguments.mode,
         )
     except Exception as error:  # noqa: BLE001 - keep the CLI failure machine-readable
         emit_event({"event": "error", "message": str(error)})

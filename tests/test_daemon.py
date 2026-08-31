@@ -5,15 +5,79 @@ from pathlib import Path
 
 import pytest
 
+from omarvis import daemon
 from omarvis.catalog import catalog_from_data
 from omarvis.daemon import (
     ExecutionResult,
     RunToolHandler,
     compact_browser_tabs,
+    initial_session_notification,
+    send_tool_result_then_screenshot,
     wait_for_conversation_connection,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_text_only_notification_does_not_claim_to_be_listening():
+    assert initial_session_notification(False) == "Listening"
+    assert initial_session_notification(True) == "Processing text command"
+
+
+def test_text_only_session_ends_after_its_agent_response(monkeypatch):
+    conversations = []
+
+    class FakeConversation:
+        def __init__(self, **options):
+            self.options = options
+            self._ws = object()
+            self.ended = False
+            self.messages = []
+            conversations.append(self)
+
+        def start_session(self):
+            pass
+
+        def send_user_message(self, message):
+            self.messages.append(message)
+            self.options["callback_agent_response"]("done")
+
+        def end_session(self):
+            self.ended = True
+
+        def wait_for_session_end(self):
+            pass
+
+    class FakeNotifier:
+        def start(self, _description):
+            pass
+
+        def update(self, _headline, _description):
+            pass
+
+    monkeypatch.setattr("elevenlabs.ElevenLabs", lambda **_options: object())
+    monkeypatch.setattr(
+        "elevenlabs.conversational_ai.conversation.Conversation",
+        FakeConversation,
+    )
+    monkeypatch.setattr("omarvis.catalog.catalog_variables", lambda **_options: {})
+    monkeypatch.setattr("omarvis.catalog.load_catalog", omarchy_catalog)
+    monkeypatch.setattr(daemon, "Notifier", FakeNotifier)
+
+    result = daemon.run_session(
+        {
+            "agent_id": "agent",
+            "ask_agent_id": "ask",
+            "herdr_announcements": False,
+        },
+        "key",
+        text_only=True,
+        messages=["open a terminal"],
+    )
+
+    assert result == 0
+    assert conversations[0].messages == ["open a terminal"]
+    assert conversations[0].ended is True
 
 
 def omarchy_catalog():
@@ -136,6 +200,55 @@ def test_browser_tab_ownership_rewrites_only_navigation_until_omarvis_owns_the_t
     assert any(call[-2:] == ("click", "@e1") for call in click_calls)
 
 
+def test_desktop_browser_launch_is_routed_into_the_managed_browser_session():
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append(tuple(argv))
+        return ExecutionResult(0, "[]", "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={
+            "agent_browser_path": "/opt/agent-browser",
+            "browser_mode": "real-profile",
+        },
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+    assert handler.handle({"command": "omarchy launch browser"})["status"] == "ok"
+    assert (
+        handler.handle({"command": "agent-browser open https://google.com"})[
+            "status"
+        ]
+        == "ok"
+    )
+
+    assert calls[0][-2:] == ("open", "about:blank")
+    assert calls[1][-2:] == ("open", "https://google.com")
+
+
+def test_desktop_browser_launch_is_unchanged_without_browser_automation():
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append(tuple(argv))
+        return ExecutionResult(None, started=True)
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={"browser_mode": "unavailable"},
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+    assert handler.handle({"command": "omarchy launch browser"})["status"] == "started"
+    assert calls == [("omarchy", "launch", "browser")]
+
+
 def test_browser_probe_timeout_waits_for_chromium_approval_without_fallback():
     calls = []
 
@@ -228,6 +341,8 @@ def test_real_profile_mode_launches_a_headed_snapshot_without_probing():
             "0",
             "--profile",
             "Default",
+            "--args",
+            "--no-startup-window",
             "--headed",
             "tab",
             "list",
@@ -255,7 +370,8 @@ def test_real_profile_mode_uses_the_configured_profile_name():
     )
 
     assert handler.handle({"command": "agent-browser tab list"})["status"] == "ok"
-    assert ("--profile", "Work", "--headed") == calls[0][6:9]
+    assert ("--profile", "Work", "--args", "--no-startup-window") == calls[0][6:10]
+    assert "--headed" in calls[0]
 
 
 def test_browser_tab_context_is_compact_and_omits_target_ids():
@@ -696,3 +812,291 @@ def test_client_tool_result_is_serialized_for_the_elevenlabs_protocol():
         "status": "started",
         "command": "omarchy launch terminal herdr",
     }
+
+
+def test_run_tool_handler_passes_ask_scope_to_policy():
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append(tuple(argv))
+        return ExecutionResult(0, "", "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers={"killactive"},
+        config={},
+        executor=executor,
+        confirmation_wait=0,
+        scope="ask",
+    )
+
+    result = handler.handle({"command": "hyprctl dispatch killactive"})
+
+    assert result["status"] == "rejected"
+    assert "ask mode" in result["reason"]
+    assert calls == []
+
+
+def test_main_defaults_to_agent_mode_and_accepts_ask_mode(monkeypatch):
+    from omarvis import daemon
+
+    calls = []
+    monkeypatch.setattr(
+        daemon,
+        "load_config",
+        lambda: {"agent_id": "agent-id", "ask_agent_id": "ask-id"},
+    )
+    monkeypatch.setattr(daemon, "load_api_key", lambda: "key")
+
+    def fake_run_session(config, api_key, **options):
+        calls.append((config, api_key, options))
+        return 0
+
+    monkeypatch.setattr(daemon, "run_session", fake_run_session)
+
+    assert daemon.main([]) == 0
+    assert daemon.main(["--mode", "agent"]) == 0
+    assert daemon.main(["--mode", "ask"]) == 0
+    assert [call[2]["mode"] for call in calls] == ["agent", "agent", "ask"]
+    assert calls[0] == calls[1]
+
+
+def test_load_config_deep_merges_dictation_defaults(tmp_path):
+    from omarvis.daemon import load_config
+
+    path = tmp_path / "config.json"
+    path.write_text('{"dictation":{"language":"sv"}}')
+
+    config = load_config(path)
+
+    assert config["dictation"] == {
+        "language": "sv",
+        "cleanup": True,
+        "model_id": "scribe_v2",
+        "chunk_size": 500,
+    }
+
+
+def test_load_config_discards_removed_anthropic_vision_block(tmp_path):
+    from omarvis.daemon import load_config
+
+    path = tmp_path / "config.json"
+    path.write_text('{"vision":{"enabled":true,"model":"vision-model"}}')
+
+    config = load_config(path)
+
+    assert "vision" not in config
+
+
+@pytest.mark.parametrize("scope", ["agent", "ask"])
+def test_omarvis_see_queues_an_elevenlabs_file_for_the_tool_call(scope):
+    def executor(*_args, **_kwargs):
+        raise AssertionError("omarvis see must never be subprocessed")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        executor=executor,
+        scope=scope,
+        screenshot_sender=lambda: "file-current-desktop",
+    )
+
+    serialized = handler.handle_client_tool(
+        {"command": "omarvis see", "tool_call_id": "tool-1"}
+    )
+    result = json.loads(serialized)
+
+    assert isinstance(serialized, str)
+    assert result["status"] == "screenshot_uploaded"
+    assert handler.take_pending_screenshot("tool-1") == "file-current-desktop"
+    assert handler.take_pending_screenshot("tool-1") is None
+
+
+def test_omarvis_see_is_clear_outside_an_active_elevenlabs_session():
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("vision should not execute")
+        ),
+    )
+
+    result = handler.handle({"command": "omarvis see"})
+
+    assert result["status"] == "unavailable"
+    assert "active ElevenLabs conversation" in result["reason"]
+
+
+def test_tool_result_is_sent_before_the_native_screenshot_turn():
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        screenshot_sender=lambda: "file-current-desktop",
+    )
+    parameters = {"command": "omarvis see", "tool_call_id": "tool-1"}
+    tool_result = handler.handle_client_tool(parameters)
+    calls = []
+
+    send_tool_result_then_screenshot(
+        {"type": "client_tool_result", "result": tool_result},
+        parameters,
+        handler,
+        send_response=lambda response: calls.append(("tool", response)),
+        send_multimodal=lambda **message: calls.append(("screenshot", message)),
+    )
+
+    assert [kind for kind, _value in calls] == ["tool", "screenshot"]
+    assert calls[1][1]["file_id"] == "file-current-desktop"
+    assert "preceding user question" in calls[1][1]["text"]
+
+
+def test_normal_tool_result_does_not_send_a_screenshot_turn():
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+    )
+    calls = []
+
+    send_tool_result_then_screenshot(
+        {"type": "client_tool_result", "result": "ok"},
+        {"command": "hyprctl clients -j", "tool_call_id": "tool-2"},
+        handler,
+        send_response=lambda response: calls.append(("tool", response)),
+        send_multimodal=lambda **message: calls.append(("screenshot", message)),
+    )
+
+    assert [kind for kind, _value in calls] == ["tool"]
+
+
+def test_screenshot_send_failure_is_reported_after_single_tool_result():
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        screenshot_sender=lambda: "file-current-desktop",
+    )
+    parameters = {"command": "omarvis see", "tool_call_id": "tool-3"}
+    result = handler.handle_client_tool(parameters)
+    responses = []
+    errors = []
+
+    send_tool_result_then_screenshot(
+        {"type": "client_tool_result", "result": result},
+        parameters,
+        handler,
+        send_response=responses.append,
+        send_multimodal=lambda **_message: (_ for _ in ()).throw(
+            RuntimeError("websocket closed")
+        ),
+        error_sink=errors.append,
+    )
+
+    assert len(responses) == 1
+    assert errors == ["websocket closed"]
+    assert handler.take_pending_screenshot("tool-3") is None
+
+
+def test_category_approval_is_fresh_scoped_and_cleared_with_the_session():
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append(tuple(argv))
+        return ExecutionResult(0, "{}", "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        executor=executor,
+        confirmation_wait=0,
+    )
+    first_command = 'herdr pane run w1:p1 "pytest"'
+    second_command = 'herdr pane run w1:p1 "pytest -q"'
+
+    assert handler.handle({"command": first_command})["status"] == "needs_confirmation"
+    handler.note_user_transcript("yes")
+    confirmed = handler.handle({"command": first_command, "confirmed": True})
+    assert confirmed["status"] == "ok"
+    assert confirmed["confirmation_category"] == "herdr:pane"
+    assert confirmed["can_approve_category"] is True
+
+    premature = handler.handle(
+        {
+            "command": first_command,
+            "confirmed": True,
+            "approve_category": True,
+        }
+    )
+    assert premature["status"] == "rejected"
+
+    handler.note_user_transcript("yes, stop asking this session")
+    approved = handler.handle(
+        {
+            "command": first_command,
+            "confirmed": True,
+            "approve_category": True,
+        }
+    )
+    assert approved == {
+        "status": "category_approved",
+        "category": "herdr:pane",
+    }
+    assert handler.handle({"command": second_command})["status"] == "ok"
+
+    handler.clear_session_approvals()
+    assert handler.handle({"command": second_command})["status"] == "needs_confirmation"
+    assert calls == [
+        ("herdr", "pane", "run", "w1:p1", "pytest"),
+        ("herdr", "pane", "run", "w1:p1", "pytest -q"),
+    ]
+
+
+def test_permanently_gated_close_never_offers_category_approval():
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        executor=lambda argv, **_options: ExecutionResult(0, "{}", ""),
+        confirmation_wait=0,
+    )
+    command = "herdr pane close w1:p1"
+
+    assert handler.handle({"command": command})["status"] == "needs_confirmation"
+    handler.note_user_transcript("yes")
+    result = handler.handle({"command": command, "confirmed": True})
+
+    assert result["status"] == "ok"
+    assert "can_approve_category" not in result
+
+
+def test_screenshot_cache_sweep_only_ages_out_owned_pngs(tmp_path):
+    import os
+
+    from omarvis.daemon import sweep_screenshot_cache
+
+    old = tmp_path / "screenshot-old.png"
+    fresh = tmp_path / "screenshot-fresh.png"
+    unrelated = tmp_path / "catalog-old.json"
+    old.write_bytes(b"old")
+    fresh.write_bytes(b"fresh")
+    unrelated.write_text("keep")
+    os.utime(old, (100.0, 100.0))
+    os.utime(fresh, (950.0, 950.0))
+    os.utime(unrelated, (100.0, 100.0))
+
+    removed = sweep_screenshot_cache(
+        {
+            "cache_dir": str(tmp_path),
+            "screenshot_cache_max_age_seconds": 100,
+        },
+        now=1000.0,
+    )
+
+    assert removed == 1
+    assert not old.exists()
+    assert fresh.exists()
+    assert unrelated.exists()

@@ -9,6 +9,10 @@ Item {
   property string lastUser: ""
   property string lastAgent: ""
   property string lastError: ""
+  property string currentMode: "agent"
+  property string pendingMode: ""
+  property string dictationState: "idle"
+  property string lastDictation: ""
   property bool stopRequested: false
   readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/$/, "")
 
@@ -20,7 +24,10 @@ Item {
       console.warn("omarvis: invalid daemon event:", line)
       return
     }
-    if (event.event === "state") root.sessionState = String(event.state || "idle")
+    if (event.event === "state") {
+      root.sessionState = String(event.state || "idle")
+      if (event.mode) root.currentMode = root.normalizeMode(event.mode)
+    }
     else if (event.event === "user") root.lastUser = String(event.text || "")
     else if (event.event === "agent") root.lastAgent = String(event.text || "")
     else if (event.event === "error") {
@@ -29,11 +36,38 @@ Item {
     }
   }
 
-  function start(): string {
-    if (daemon.running) return "already-running"
+  function handleDictationEvent(line) {
+    var event
+    try {
+      event = JSON.parse(line)
+    } catch (error) {
+      console.warn("omarvis dictate: invalid event:", line)
+      return
+    }
+    if (event.event !== "dictation") return
+    root.dictationState = String(event.state || "idle")
+    if (event.text) root.lastDictation = String(event.text)
+    if (event.message) root.lastError = String(event.message)
+  }
+
+  function normalizeMode(mode): string {
+    return String(mode || "agent") === "ask" ? "ask" : "agent"
+  }
+
+  function start(mode = "agent"): string {
+    var requestedMode = root.normalizeMode(mode)
+    if (daemon.running) {
+      if (requestedMode === root.currentMode) return "already-running"
+      root.pendingMode = requestedMode
+      root.stopRequested = true
+      daemon.signal(15)
+      killTimer.restart()
+      return "restarting"
+    }
     killTimer.stop()
     root.stopRequested = false
     root.lastError = ""
+    root.currentMode = requestedMode
     root.sessionState = "starting"
     daemon.running = true
     return "starting"
@@ -41,19 +75,31 @@ Item {
 
   function stop(): string {
     if (!daemon.running) return "not-running"
+    root.pendingMode = ""
     root.stopRequested = true
     daemon.signal(15)
     killTimer.restart()
     return "stopping"
   }
 
-  function toggle(): string {
-    return daemon.running ? root.stop() : root.start()
+  function toggle(mode = "agent"): string {
+    var requestedMode = root.normalizeMode(mode)
+    if (!daemon.running) return root.start(requestedMode)
+    if (requestedMode === root.currentMode) return root.stop()
+    return root.start(requestedMode)
+  }
+
+  function dictate(action): string {
+    var command = String(action || "").toLowerCase()
+    if (command !== "start" && command !== "stop") return "expected-start-or-stop"
+    if (!dictationDaemon.running) return "dictation-daemon-not-running"
+    dictationDaemon.write(command + "\n")
+    return command === "start" ? "recording" : "transcribing"
   }
 
   Process {
     id: daemon
-    command: [root.pluginDir + "/bin/omarvis-run"]
+    command: [root.pluginDir + "/bin/omarvis-run", "--mode", root.currentMode]
     stdout: SplitParser {
       onRead: data => root.handleEvent(String(data))
     }
@@ -67,7 +113,37 @@ Item {
       root.sessionState = expectedStop || exitCode === 0 ? "idle" : "error"
       if (!expectedStop && exitCode !== 0 && !root.lastError)
         root.lastError = "Daemon exited with code " + exitCode
+      if (root.pendingMode) {
+        var restartMode = root.pendingMode
+        root.pendingMode = ""
+        Qt.callLater(function() { root.start(restartMode) })
+      }
     }
+  }
+
+  Process {
+    id: dictationDaemon
+    command: [root.pluginDir + "/bin/omarvis-dictate"]
+    running: true
+    stdinEnabled: true
+    stdout: SplitParser {
+      onRead: data => root.handleDictationEvent(String(data))
+    }
+    stderr: SplitParser {
+      onRead: data => console.log("omarvis dictate:", data)
+    }
+    onExited: function(exitCode, exitStatus) {
+      root.dictationState = "idle"
+      if (exitCode !== 0) root.lastError = "Dictation daemon exited with code " + exitCode
+      dictationRestart.restart()
+    }
+  }
+
+  Timer {
+    id: dictationRestart
+    interval: 2000
+    repeat: false
+    onTriggered: if (!dictationDaemon.running) dictationDaemon.running = true
   }
 
   Timer {
@@ -80,15 +156,24 @@ Item {
   IpcHandler {
     target: "omarvis"
 
-    function toggle(): string { return root.toggle() }
-    function start(): string { return root.start() }
+    // Quickshell only exports IPC parameters that have explicit QML types.
+    // Keep the original no-argument Agent routes for existing installs, and
+    // use separate typed routes when a mode is selected explicitly.
+    function toggle(): string { return root.toggle("agent") }
+    function toggleMode(mode: string): string { return root.toggle(mode) }
+    function start(): string { return root.start("agent") }
+    function startMode(mode: string): string { return root.start(mode) }
     function stop(): string { return root.stop() }
+    function dictate(action: string): string { return root.dictate(action) }
     function status(): string {
       return JSON.stringify({
         sessionState: root.sessionState,
         lastUser: root.lastUser,
         lastAgent: root.lastAgent,
         lastError: root.lastError,
+        currentMode: root.currentMode,
+        dictationState: root.dictationState,
+        lastDictation: root.lastDictation,
         running: daemon.running
       })
     }

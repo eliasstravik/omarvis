@@ -10,12 +10,14 @@ from typing import Any
 from .daemon import CONFIG_PATH, DEFAULT_CONFIG, load_api_key, load_config
 
 PROMPT_PATH = Path(__file__).parent.parent / "agent" / "prompt.md"
+ASK_PROMPT_PATH = Path(__file__).parent.parent / "agent" / "prompt-ask.md"
 DYNAMIC_VARIABLES = (
     "command_catalog",
     "hyprland_dispatchers",
     "herdr_catalog",
     "browser_catalog",
     "current_state",
+    "profile",
 )
 
 
@@ -25,7 +27,14 @@ def conversation_payload(prompt: str, llm: str) -> dict[str, Any]:
             "turn_timeout": 20.0,
             "silence_end_call_timeout": 30.0,
         },
-        "conversation": {"max_duration_seconds": 300},
+        "conversation": {
+            "max_duration_seconds": 300,
+            "file_input": {
+                "enabled": True,
+                "max_files_in_memory": 3,
+                "max_files_per_conversation": 10,
+            },
+        },
         "agent": {
             "first_message": "",
             "language": "en",
@@ -47,7 +56,7 @@ def conversation_payload(prompt: str, llm: str) -> dict[str, Any]:
                     {
                         "type": "client",
                         "name": "run",
-                        "description": "Run one policy-approved Omarchy, Hyprland, Herdr, or browser command on the user's computer.",
+                        "description": "Run one policy-approved Omarchy, Hyprland, Herdr, browser, or Omarvis screenshot command on the user's computer.",
                         "expects_response": True,
                         "response_timeout_secs": 35,
                         "parameters": {
@@ -61,6 +70,10 @@ def conversation_payload(prompt: str, llm: str) -> dict[str, Any]:
                                 "confirmed": {
                                     "type": "boolean",
                                     "description": "True only after the user explicitly confirms the exact pending command.",
+                                },
+                                "approve_category": {
+                                    "type": "boolean",
+                                    "description": "True only after a confirmed command offered category approval and the user explicitly agreed in a later turn.",
                                 },
                             },
                         },
@@ -78,16 +91,38 @@ def save_config(config: dict[str, Any], path: Path = CONFIG_PATH) -> None:
 
 
 def manual_steps() -> str:
-    return """Create an ElevenLabs Agent in the dashboard with these settings:
-- System prompt: paste agent/prompt.md.
+    return """Create two ElevenLabs Agents in the dashboard with these settings:
+- System prompts: paste agent/prompt.md for Omarvis and agent/prompt-ask.md for Omarvis Ask.
 - LLM: GPT-5.6 Sol (`gpt-5.6-sol`).
 - First message: empty. Language: English.
 - Turn timeout: 20 seconds. Silence end-call timeout: 30 seconds. Maximum duration: 300 seconds.
+- Enable file input with at most 3 files in memory and 10 files per conversation.
 - Enable the `end_call` system tool.
 - Add a Client tool named `run` with Wait for response enabled and a 35-second response timeout.
-- `run` parameters: required string `command`; optional boolean `confirmed`.
-- Declare command_catalog, hyprland_dispatchers, herdr_catalog, browser_catalog, and current_state as dynamic variables.
-Then rerun `python -m omarvis.provision --agent-id <pasted-agent-id>`."""
+- `run` parameters: required string `command`; optional booleans `confirmed` and `approve_category`.
+- Declare command_catalog, hyprland_dispatchers, herdr_catalog, browser_catalog, current_state, and profile as dynamic variables.
+Store both IDs as agent_id and ask_agent_id in ~/.config/omarchy/omarvis/config.json."""
+
+
+def _upsert_agent(
+    client: Any,
+    *,
+    agent_id: str,
+    name: str,
+    conversation_config: Any,
+) -> str:
+    if agent_id:
+        response = client.conversational_ai.agents.update(
+            agent_id,
+            conversation_config=conversation_config,
+            name=name,
+        )
+        return str(getattr(response, "agent_id", agent_id))
+    response = client.conversational_ai.agents.create(
+        conversation_config=conversation_config,
+        name=name,
+    )
+    return str(response.agent_id)
 
 
 def provision(config: dict[str, Any], api_key: str) -> str:
@@ -97,25 +132,28 @@ def provision(config: dict[str, Any], api_key: str) -> str:
         raise RuntimeError(
             "The ElevenLabs SDK is missing. Run bin/omarvis-setup.\n" + manual_steps()
         ) from error
-    prompt = PROMPT_PATH.read_text()
-    conversation_config = ConversationalConfig.model_validate(
-        conversation_payload(prompt, str(config["llm"]))
-    )
     client = ElevenLabs(api_key=api_key)
-    if config.get("agent_id"):
-        response = client.conversational_ai.agents.update(
-            str(config["agent_id"]),
-            conversation_config=conversation_config,
-            name="Omarvis",
-        )
-        agent_id = str(getattr(response, "agent_id", config["agent_id"]))
-    else:
-        response = client.conversational_ai.agents.create(
-            conversation_config=conversation_config,
-            name="Omarvis",
-        )
-        agent_id = str(response.agent_id)
+    agent_config = ConversationalConfig.model_validate(
+        conversation_payload(PROMPT_PATH.read_text(), str(config["llm"]))
+    )
+    agent_id = _upsert_agent(
+        client,
+        agent_id=str(config.get("agent_id") or ""),
+        name="Omarvis",
+        conversation_config=agent_config,
+    )
     config["agent_id"] = agent_id
+    save_config(config)
+
+    ask_config = ConversationalConfig.model_validate(
+        conversation_payload(ASK_PROMPT_PATH.read_text(), str(config["llm"]))
+    )
+    config["ask_agent_id"] = _upsert_agent(
+        client,
+        agent_id=str(config.get("ask_agent_id") or ""),
+        name="Omarvis Ask",
+        conversation_config=ask_config,
+    )
     save_config(config)
     return agent_id
 
@@ -145,6 +183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Provisioning failed: {error}\n\n{manual_steps()}", file=sys.stderr)
         return 1
     print(f"Omarvis agent ready: {agent_id}")
+    print(f"Omarvis ask agent ready: {config['ask_agent_id']}")
     return 0
 
 

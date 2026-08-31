@@ -1,6 +1,6 @@
 # Omarvis
 
-Omarvis is an Omarchy shell plugin that starts an ElevenLabs voice session from a hotkey or bar widget. It can run allowlisted Omarchy and Hyprland commands, control Herdr, and drive Chromium through `agent-browser`.
+Omarvis is an Omarchy shell plugin for voice questions, policy-guarded desktop control, hold-to-talk dictation, and typed commands. It can run allowlisted Omarchy and Hyprland commands, control Herdr, and drive Chromium through `agent-browser`.
 
 The plugin exposes one client tool named `run`. Python policy code parses every command with `shlex`, checks the route and flags, and executes the resulting argument list with `shell=False`. The model cannot run a shell command outside that policy.
 
@@ -10,6 +10,7 @@ The plugin exposes one client tool named `run`. Python policy code parses every 
 - An ElevenLabs account and API key
 - Chromium (or Chrome) with an existing profile for browser control with your logins
 - Herdr for terminal and coding-agent control
+- `wtype` for direct Wayland dictation input
 
 The setup script installs PortAudio, PyAudio, the ElevenLabs Python SDK, and agent-browser 0.34. It creates runtime files under `~/.config/omarchy/omarvis/` and `~/.local/share/omarvis/`. It does not edit this plugin checkout.
 
@@ -24,13 +25,18 @@ omarchy plugin add https://github.com/eliasstravik/Omarvis.git --enable --yes
 
 You can provide the API key in `ELEVENLABS_API_KEY`. If it is absent, setup asks for it and writes `~/.config/omarchy/omarvis/api_key` with mode 600.
 
-Setup prints this optional Hyprland binding and can append it after making a timestamped backup:
+Setup prints the J-key family and can append any missing bindings after making a timestamped backup:
 
 ```lua
 o.bind("SUPER + CTRL + J", "Omarvis", "omarchy-shell omarvis toggle")
+o.bind("SUPER + SHIFT + J", "Omarvis Ask", "omarchy-shell omarvis toggleMode ask")
+hl.unbind("SUPER + J") -- replaces Omarchy's Toggle window split binding where present
+o.bind("SUPER + J", "Omarvis Dictate", "omarchy-shell omarvis dictate start")
+o.bind("SUPER + J", "Omarvis Dictate Stop", "omarchy-shell omarvis dictate stop", { release = true })
+o.bind("SUPER + ALT + J", "Omarvis Text", "<plugin-dir>/bin/omarvis-text")
 ```
 
-Press `SUPER + CTRL + J` or click the bar microphone to start or stop one session. Sessions also end when you ask Omarvis to stop, after about 30 seconds of silence, or after the five-minute limit.
+`SUPER + CTRL + J` starts the full Agent scope. `SUPER + SHIFT + J` starts the strictly read-only Ask scope. Hold `SUPER + J` to dictate your own words into the focused window, or use `SUPER + ALT + J` for a typed one-shot Agent instruction. Clicking the bar microphone toggles Agent mode.
 
 ## What it can do
 
@@ -38,15 +44,23 @@ Omarvis can use documented, non-hidden `omarchy` routes and a curated set of Hyp
 
 Herdr support includes reading agent and workspace state, focusing agents and panes, submitting prompts, splitting and moving panes, sending plain keys, and showing notifications. Running arbitrary terminal commands, sending control-key combinations, or closing Herdr resources requires confirmation.
 
-Browser support includes navigation, tab management, snapshots, clicking, filling fields, keyboard input, page titles, screenshots, downloads, and uploads. Omarvis opens its own tab for the first navigation. It only changes to one of your other tabs when you ask it to switch.
+Browser support includes navigation, tab management, snapshots, clicking, filling fields, keyboard input, page titles, screenshots, downloads, and uploads. In `own-browser` mode Omarvis opens its own tab for the first navigation. Its isolated browser modes suppress Chromium's automatic startup tab, open one controlled tab, and create another only when you explicitly ask. It only changes to one of your other tabs when you ask it to switch.
 
-Omarvis does not provide a wake word, always-on listening, dictation, general shell access, arbitrary JavaScript evaluation, tmux control, or keystroke injection into ordinary desktop windows. Multi-page checkout and form workflows are outside v1.
+Ask mode is enforced in Python policy: dispatchers, navigation, clicks, launches, and every other mutation are refused even if the model requests one. `omarvis see` is intercepted in-process, captures the current desktop, uploads it into the active ElevenLabs conversation, and follows the tool result with a native multimodal image turn. The old local OCR route is policy-blocked.
+
+Omarvis does not provide a wake word, always-on listening, general shell access, arbitrary JavaScript evaluation, tmux control, or agent-selected keystroke injection into ordinary desktop windows. Dictation is the sole injection path and types only the user's direct Scribe transcript.
 
 ## Confirmation
 
 Commands that shut down or leave the session, install or remove software, activate plugin code, change the bar layout, run terminal commands, close Herdr resources, upload or download files, or close the browser attachment require a spoken confirmation.
 
 The daemon records the exact parsed argument list, waits for a later user transcript, and accepts the confirmation for 30 seconds. A first tool call with `confirmed: true`, a changed command, an expired request, or a response generated before the user speaks cannot bypass this check.
+
+After one confirmed non-permanent-risk command, Omarvis may offer to stop asking for that category for the rest of the session. Category approvals disappear when the session ends. Deletes, closes, session/server stops, and system power actions always require fresh confirmation.
+
+## Memory and screenshots
+
+Setup seeds `~/.config/omarchy/omarvis/profile.md`; up to 2,000 characters are supplied to both agents. Both agents have ElevenLabs file input enabled. Screenshots used by `omarvis see` are uploaded only on an explicit screen-content question and deleted from the local cache immediately after upload. Omarvis has no Anthropic integration or vision API key.
 
 ## Browser setup
 
@@ -60,7 +74,7 @@ In `real-profile` and `own-browser` modes Omarvis can use your logged-in account
 
 ## Privacy
 
-During a session, your microphone audio, the Omarchy, Herdr, and browser command lists, your workspace number, the class and title of your open windows, your Herdr workspace and agent names and their working-directory paths, and your open browser tab titles and hosts are sent to ElevenLabs. Any page snapshot or text Omarvis requests is also sent to ElevenLabs. Nothing is sent while Omarvis is idle.
+During a session, your microphone audio, profile memory, the Omarchy, Herdr, and browser command lists, your workspace number, the class and title of your open windows, your Herdr workspace and agent names and their working-directory paths, and your open browser tab titles and hosts are sent to ElevenLabs. Any page snapshot or text Omarvis requests is also sent to ElevenLabs. A current desktop screenshot is uploaded to ElevenLabs only when `omarvis see` is invoked, and ElevenLabs bills each uploaded file. Dictation audio is sent to ElevenLabs Scribe on release. Nothing is sent while Omarvis is idle or while the dictation daemon is waiting.
 
 ElevenLabs bills Agents sessions by conversation minute. LLM usage may be billed separately as pass-through usage. Omarvis starts sessions only when you press the hotkey or click the widget and caps each session at five minutes.
 

@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from omarvis.catalog import catalog_from_data
-from omarvis.policy import PendingConfirmation, decide
+from omarvis.policy import ASK_REFUSAL_REASON, PendingConfirmation, decide
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -212,12 +212,52 @@ def test_approved_herdr_commands_run(command):
         "herdr workspace close w1",
         "herdr session stop main",
         "herdr server reload-config",
-        "herdr worktree list",
         "herdr agent send-keys reviewer ctrl+c",
     ],
 )
 def test_sensitive_herdr_commands_require_confirmation(command):
     assert decide(command, catalog=omarchy_catalog()).kind == "confirm"
+
+
+def test_herdr_worktree_list_is_immediate_read_only():
+    assert decide("herdr worktree list", catalog=omarchy_catalog()).kind == "run"
+
+
+def test_session_category_approval_skips_repeatable_but_not_permanent_risks():
+    catalog = omarchy_catalog()
+
+    assert (
+        decide(
+            'herdr pane run w1:p1 "pytest"',
+            catalog=catalog,
+            approved_categories={"herdr:pane"},
+        ).kind
+        == "run"
+    )
+    assert (
+        decide(
+            "herdr pane close w1:p1",
+            catalog=catalog,
+            approved_categories={"herdr:pane"},
+        ).kind
+        == "confirm"
+    )
+    assert (
+        decide(
+            "herdr session stop main",
+            catalog=catalog,
+            approved_categories={"herdr:session"},
+        ).kind
+        == "confirm"
+    )
+    assert (
+        decide(
+            "omarchy system shutdown",
+            catalog=catalog,
+            approved_categories={"omarchy:system"},
+        ).kind
+        == "confirm"
+    )
 
 
 @pytest.mark.parametrize(
@@ -305,3 +345,191 @@ def test_sensitive_browser_commands_require_confirmation(command):
 )
 def test_unapproved_browser_commands_and_flags_are_rejected(command):
     assert decide(command, catalog=omarchy_catalog()).kind == "reject"
+
+
+ASK_READ_COMMANDS = [
+    "hyprctl clients -j",
+    "hyprctl activewindow -j",
+    "hyprctl activeworkspace -j",
+    "herdr agent list",
+    "herdr agent get reviewer",
+    "herdr agent read reviewer",
+    "herdr agent explain reviewer",
+    "herdr pane list",
+    "herdr pane get w1:p1",
+    "herdr pane read w1:p1",
+    "herdr pane process-info w1:p1",
+    "herdr pane neighbor w1:p1 left",
+    "herdr pane edges w1:p1",
+    "herdr tab list",
+    "herdr tab get w1:t1",
+    "herdr workspace list",
+    "herdr workspace get w1",
+    "herdr session list",
+    "herdr worktree list",
+    "herdr api snapshot",
+    "herdr status",
+    "agent-browser snapshot",
+    "agent-browser snapshot -i -d 4",
+    "agent-browser tab list",
+    "agent-browser screenshot",
+    "agent-browser scroll down 400",
+    "agent-browser scrollintoview @e3",
+    *(f"agent-browser get {verb}" for verb in (
+        "text", "html", "value", "attr", "title", "url", "count", "box", "styles"
+    )),
+    *(f"agent-browser is {verb}" for verb in ("visible", "enabled", "checked")),
+    "omarchy capture screenshot",
+    "omarchy screenshot",
+    "omarchy theme current",
+    "omarchy theme list",
+    "omarchy system stats",
+    "omarchy commands",
+    "omarchy commands --json",
+]
+
+
+@pytest.mark.parametrize("command", ASK_READ_COMMANDS)
+def test_ask_scope_allows_only_the_documented_read_routes(command):
+    decision = decide(command, catalog=omarchy_catalog(), scope="ask")
+
+    assert decision.kind == "run"
+
+
+@pytest.mark.parametrize("scope", ["agent", "ask"])
+def test_all_scopes_force_screen_reading_through_elevenlabs(scope):
+    decision = decide(
+        "omarchy capture text",
+        catalog=omarchy_catalog(),
+        scope=scope,
+    )
+
+    assert decision.kind == "reject"
+    assert "use omarvis see" in decision.reason
+
+
+ASK_MUTATING_COMMANDS = [
+    "hyprctl dispatch workspace 3",
+    "hyprctl dispatch focuswindow class:firefox",
+    "hyprctl dispatch killactive",
+    "hyprctl dispatch exit",
+    "herdr agent focus reviewer",
+    'herdr agent prompt reviewer "fix it"',
+    "herdr agent start reviewer",
+    "herdr agent rename reviewer new-name",
+    "herdr agent send-keys reviewer esc",
+    "herdr pane focus w1:p1",
+    "herdr pane split --current --direction right",
+    "herdr pane swap w1:p1 w1:p2",
+    "herdr pane move w1:p1 --direction right",
+    "herdr pane resize w1:p1 --direction right --amount 5",
+    "herdr pane zoom w1:p1",
+    "herdr pane rename w1:p1 shell",
+    "herdr pane input w1:p1 hello",
+    "herdr pane send-keys w1:p1 enter",
+    'herdr pane run w1:p1 "pytest"',
+    "herdr pane send-text w1:p1 hello",
+    "herdr pane close w1:p1",
+    "herdr tab focus w1:t1",
+    "herdr tab create --workspace w1",
+    "herdr tab rename w1:t1 new-name",
+    "herdr tab close w1:t1",
+    "herdr workspace focus w1",
+    "herdr workspace create project",
+    "herdr workspace rename w1 project",
+    "herdr workspace close w1",
+    "herdr session stop main",
+    "herdr session delete main",
+    "herdr server stop",
+    "herdr server reload-config",
+    "herdr worktree create repo branch",
+    "herdr worktree open repo",
+    "herdr worktree remove repo branch",
+    "herdr notification show Omarvis done",
+    "agent-browser open https://example.com",
+    "agent-browser back",
+    "agent-browser forward",
+    "agent-browser reload",
+    "agent-browser click @e1",
+    "agent-browser dblclick @e1",
+    "agent-browser hover @e1",
+    "agent-browser focus @e1",
+    "agent-browser fill @e1 hello",
+    "agent-browser type @e1 hello",
+    "agent-browser press Enter",
+    "agent-browser select @e1 option",
+    "agent-browser check @e1",
+    "agent-browser uncheck @e1",
+    'agent-browser find text "Go" click',
+    "agent-browser wait 100",
+    "agent-browser tab new https://example.com",
+    "agent-browser tab close",
+    "agent-browser tab t2",
+    'agent-browser keyboard type "hello"',
+    "agent-browser close",
+    "agent-browser download @e1 /tmp/file",
+    "agent-browser upload @e1 /tmp/file",
+    "agent-browser drag @e1 @e2",
+    "omarchy theme set tokyo-night",
+    "omarchy launch browser",
+    "omarchy shell shell setPluginEnabled acme.thing true",
+    'omarchy agent prompt "change the system"',
+    "omarchy system shutdown",
+    "omarchy plugin enable acme.thing",
+    "omarchy pkg add example",
+]
+
+
+@pytest.mark.parametrize("command", ASK_MUTATING_COMMANDS)
+def test_every_agent_mutation_in_the_scope_table_is_refused_in_ask_mode(command):
+    catalog = omarchy_catalog()
+    agent_decision = decide(
+        command,
+        catalog=catalog,
+        dispatchers={"workspace", "focuswindow", "killactive", "exit"},
+    )
+    ask_decision = decide(
+        command,
+        catalog=catalog,
+        dispatchers={"workspace", "focuswindow", "killactive", "exit"},
+        scope="ask",
+    )
+
+    assert agent_decision.kind in {"run", "confirm"}
+    assert ask_decision.kind == "reject"
+    assert ask_decision.reason == ASK_REFUSAL_REASON
+    assert "ask mode" in ask_decision.reason
+    assert "SUPER + CTRL + J" in ask_decision.reason
+
+
+@pytest.mark.parametrize("command", ASK_READ_COMMANDS + ASK_MUTATING_COMMANDS)
+def test_explicit_agent_scope_is_identical_to_the_default_scope(command):
+    arguments = {
+        "catalog": omarchy_catalog(),
+        "dispatchers": {"workspace", "focuswindow", "killactive", "exit"},
+        "now": 100.0,
+    }
+
+    assert decide(command, **arguments, scope="agent") == decide(command, **arguments)
+
+
+def test_ask_scope_never_reaches_confirmation_machinery():
+    decision = decide(
+        "herdr worktree list",
+        catalog=omarchy_catalog(),
+        scope="ask",
+        confirmed=True,
+        pending=PendingConfirmation(("herdr", "worktree", "list"), 99.0, 1),
+        now=100.0,
+    )
+
+    assert decision.kind == "run"
+
+
+@pytest.mark.parametrize("scope", ["agent", "ask"])
+def test_omarvis_see_is_the_only_internal_policy_route(scope):
+    catalog = omarchy_catalog()
+
+    assert decide("omarvis see", catalog=catalog, scope=scope).kind == "run"
+    rejected = decide("omarvis see /tmp/file", catalog=catalog, scope=scope)
+    assert rejected.kind == "reject"

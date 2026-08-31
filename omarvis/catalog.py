@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -539,6 +540,21 @@ def hyprland_prompt() -> str:
     return "\n".join(lines)
 
 
+def profile_memory(config: Mapping[str, Any] | None = None, *, limit: int = 2000) -> str:
+    path = Path(
+        os.path.expanduser(
+            str(
+                (config or {}).get("profile_path")
+                or "~/.config/omarchy/omarvis/profile.md"
+            )
+        )
+    )
+    try:
+        return path.read_text(errors="replace")[:limit]
+    except OSError:
+        return ""
+
+
 def catalog_variables(
     *,
     config: Mapping[str, Any] | None = None,
@@ -550,6 +566,7 @@ def catalog_variables(
         "herdr_catalog": load_herdr_catalog(runner=runner).prompt_text,
         "browser_catalog": browser_catalog().prompt_text,
         "current_state": current_state(config=config, runner=runner),
+        "profile": profile_memory(config),
     }
 
 
