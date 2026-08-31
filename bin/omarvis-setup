@@ -10,7 +10,8 @@ PROFILE_PATH="$CONFIG_DIR/profile.md"
 VENV_DIR="$HOME/.local/share/omarvis/venv"
 BINDINGS_PATH="$HOME/.config/hypr/bindings.lua"
 AGENT_BINDING='o.bind("SUPER + CTRL + J", "Omarvis", "omarchy-shell omarvis toggle")'
-ASK_BINDING='o.bind("SUPER + SHIFT + J", "Omarvis Ask", "omarchy-shell omarvis toggle ask")'
+ASK_LEGACY_BINDING='o.bind("SUPER + SHIFT + J", "Omarvis Ask", "omarchy-shell omarvis toggle ask")'
+ASK_BINDING='o.bind("SUPER + SHIFT + J", "Omarvis Ask", "omarchy-shell omarvis toggleMode ask")'
 DICTATE_UNBIND='hl.unbind("SUPER + J")'
 DICTATE_START_BINDING='o.bind("SUPER + J", "Omarvis Dictate", "omarchy-shell omarvis dictate start")'
 DICTATE_STOP_BINDING='o.bind("SUPER + J", "Omarvis Dictate Stop", "omarchy-shell omarvis dictate stop", { release = true })'
@@ -153,9 +154,13 @@ echo "$DICTATE_STOP_BINDING"
 echo "$TEXT_BINDING"
 missing_bindings=()
 needs_dictation_rebind=false
+needs_ask_rebind=false
 if [[ -f $BINDINGS_PATH ]]; then
   grep -Fq 'omarchy-shell omarvis toggle")' "$BINDINGS_PATH" || missing_bindings+=("$AGENT_BINDING")
-  grep -Fq 'omarchy-shell omarvis toggle ask")' "$BINDINGS_PATH" || missing_bindings+=("$ASK_BINDING")
+  grep -Fq 'omarchy-shell omarvis toggleMode ask")' "$BINDINGS_PATH" || missing_bindings+=("$ASK_BINDING")
+  if grep -Fq "$ASK_LEGACY_BINDING" "$BINDINGS_PATH"; then
+    needs_ask_rebind=true
+  fi
   if ! grep -Fq "$DICTATE_UNBIND" "$BINDINGS_PATH"; then
     needs_dictation_rebind=true
     missing_bindings+=("$DICTATE_UNBIND" "$DICTATE_START_BINDING" "$DICTATE_STOP_BINDING")
@@ -165,8 +170,8 @@ if [[ -f $BINDINGS_PATH ]]; then
   fi
   grep -Fq '/bin/omarvis-text")' "$BINDINGS_PATH" || missing_bindings+=("$TEXT_BINDING")
 fi
-if (( ${#missing_bindings[@]} > 0 )); then
-  read -r -p "Append the missing bindings to $BINDINGS_PATH? [y/N] " answer
+if (( ${#missing_bindings[@]} > 0 )) || [[ $needs_ask_rebind == true ]]; then
+  read -r -p "Update the missing or outdated bindings in $BINDINGS_PATH? [y/N] " answer
   if [[ $answer == [yY] || $answer == [yY][eE][sS] ]]; then
     backup="$BINDINGS_PATH.$(date +%Y%m%d-%H%M%S).bak"
     cp "$BINDINGS_PATH" "$backup"
@@ -176,8 +181,13 @@ if (( ${#missing_bindings[@]} > 0 )); then
         -e '\|omarchy-shell omarvis dictate stop", { release = true })|d' \
         "$BINDINGS_PATH"
     fi
-    printf '\n' >>"$BINDINGS_PATH"
-    printf '%s\n' "${missing_bindings[@]}" >>"$BINDINGS_PATH"
+    if [[ $needs_ask_rebind == true ]]; then
+      sed -i "\|$ASK_LEGACY_BINDING|d" "$BINDINGS_PATH"
+    fi
+    if (( ${#missing_bindings[@]} > 0 )); then
+      printf '\n' >>"$BINDINGS_PATH"
+      printf '%s\n' "${missing_bindings[@]}" >>"$BINDINGS_PATH"
+    fi
     echo "Updated bindings. Backup: $backup"
   fi
 fi

@@ -156,8 +156,13 @@ Item {
   IpcHandler {
     target: "omarvis"
 
-    function toggle(mode = "agent"): string { return root.toggle(mode) }
-    function start(mode = "agent"): string { return root.start(mode) }
+    // Quickshell only exports IPC parameters that have explicit QML types.
+    // Keep the original no-argument Agent routes for existing installs, and
+    // use separate typed routes when a mode is selected explicitly.
+    function toggle(): string { return root.toggle("agent") }
+    function toggleMode(mode: string): string { return root.toggle(mode) }
+    function start(): string { return root.start("agent") }
+    function startMode(mode: string): string { return root.start(mode) }
     function stop(): string { return root.stop() }
     function dictate(action: string): string { return root.dictate(action) }
     function status(): string {
