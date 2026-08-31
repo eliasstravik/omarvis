@@ -67,19 +67,11 @@ def test_dictation_service_records_transcribes_cleans_and_injects():
             events.append("mic-stop")
             return b"pcm"
 
-    class Notifier:
-        def start(self):
-            events.append("notify-start")
-
-        def update(self, text):
-            events.append(("notify", text))
-
     service = DictationService(
         recorder=Recorder(),
         transcriber=lambda audio: "  dictated   words\n",
         injector=injected.append,
         cleanup=True,
-        notifier=Notifier(),
         event_sink=events.append,
     )
 
@@ -128,7 +120,6 @@ def test_audio_recorder_emits_throttled_recording_levels(monkeypatch):
         recorder=recorder,
         transcriber=lambda _audio: "captured",
         injector=lambda _text: None,
-        notifier=SimpleNamespace(start=lambda: None, update=lambda _text: None),
         event_sink=events.append,
     )
 
@@ -162,7 +153,6 @@ def test_dictation_plays_open_and_close_earcons_when_enabled():
         recorder=Recorder(),
         transcriber=lambda _audio: "captured",
         injector=lambda _text: None,
-        notifier=SimpleNamespace(start=lambda: None, update=lambda _text: None),
         earcons_enabled=True,
         sound_player=lambda name, *, enabled: sounds.append((name, enabled)),
     )
@@ -182,7 +172,6 @@ def test_dictation_plays_error_earcon_on_capture_failure():
         ),
         transcriber=lambda _audio: "",
         injector=lambda _text: None,
-        notifier=SimpleNamespace(start=lambda: None, update=lambda _text: None),
         earcons_enabled=True,
         sound_player=lambda name, *, enabled: sounds.append((name, enabled)),
     )

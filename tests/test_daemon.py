@@ -11,17 +11,11 @@ from omarvis.daemon import (
     ExecutionResult,
     RunToolHandler,
     compact_browser_tabs,
-    initial_session_notification,
     send_tool_result_then_screenshot,
     wait_for_conversation_connection,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
-
-
-def test_text_only_notification_does_not_claim_to_be_listening():
-    assert initial_session_notification(False) == "Listening"
-    assert initial_session_notification(True) == "Processing text command"
 
 
 def test_text_only_session_ends_after_its_agent_response(monkeypatch):
@@ -49,13 +43,6 @@ def test_text_only_session_ends_after_its_agent_response(monkeypatch):
         def wait_for_session_end(self):
             pass
 
-    class FakeNotifier:
-        def start(self, _description):
-            pass
-
-        def update(self, _headline, _description):
-            pass
-
     monkeypatch.setattr("elevenlabs.ElevenLabs", lambda **_options: object())
     monkeypatch.setattr(
         "elevenlabs.conversational_ai.conversation.Conversation",
@@ -63,7 +50,6 @@ def test_text_only_session_ends_after_its_agent_response(monkeypatch):
     )
     monkeypatch.setattr("omarvis.catalog.catalog_variables", lambda **_options: {})
     monkeypatch.setattr("omarvis.catalog.load_catalog", omarchy_catalog)
-    monkeypatch.setattr(daemon, "Notifier", FakeNotifier)
     monkeypatch.setattr(daemon, "emit_event", events.append)
 
     result = daemon.run_session(
@@ -110,13 +96,6 @@ def test_session_emits_thinking_streaming_parts_and_final_zero(monkeypatch):
         def wait_for_session_end(self):
             pass
 
-    class FakeNotifier:
-        def start(self, _description):
-            pass
-
-        def update(self, _headline, _description):
-            pass
-
     monkeypatch.setattr("elevenlabs.ElevenLabs", lambda **_options: object())
     monkeypatch.setattr(
         "elevenlabs.conversational_ai.conversation.Conversation",
@@ -124,7 +103,6 @@ def test_session_emits_thinking_streaming_parts_and_final_zero(monkeypatch):
     )
     monkeypatch.setattr("omarvis.catalog.catalog_variables", lambda **_options: {})
     monkeypatch.setattr("omarvis.catalog.load_catalog", omarchy_catalog)
-    monkeypatch.setattr(daemon, "Notifier", FakeNotifier)
     monkeypatch.setattr(daemon, "emit_event", events.append)
 
     assert daemon.run_session(

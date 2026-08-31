@@ -680,52 +680,6 @@ def sweep_screenshot_cache(
     return removed
 
 
-def initial_session_notification(text_only: bool) -> str:
-    return "Processing text command" if text_only else "Listening"
-
-
-class Notifier:
-    def __init__(self) -> None:
-        self.notification_id = ""
-
-    def start(self, description: str = "Listening") -> None:
-        try:
-            completed = subprocess.run(
-                [
-                    "omarchy-notification-send",
-                    "-p",
-                    "-g",
-                    chr(0xF130),
-                    "Omarvis",
-                    description,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-            if completed.returncode == 0:
-                self.notification_id = completed.stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            pass
-
-    def update(self, headline: str, description: str) -> None:
-        command = ["omarchy-notification-send"]
-        if self.notification_id:
-            command.extend(("-r", self.notification_id))
-        command.extend((headline, description[:240]))
-        try:
-            subprocess.run(
-                command,
-                timeout=2,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except (OSError, subprocess.SubprocessError):
-            pass
-
-
 def _agent_statuses() -> dict[str, tuple[str, str]]:
     completed = subprocess.run(
         ["herdr", "agent", "list"],
@@ -958,7 +912,6 @@ def run_session(
     stop_requested = threading.Event()
     session_ended = threading.Event()
     contextual_updates: queue.Queue[str] = queue.Queue()
-    notifier = Notifier()
     levels = LevelThrottle(
         lambda in_level, out_level: emit_event(
             {"event": "level", "in": in_level, "out": out_level}
@@ -979,8 +932,6 @@ def run_session(
 
     def on_tool_event(event: Mapping[str, Any]) -> None:
         emit_event(event)
-        if event.get("event") == "ran":
-            notifier.update("Omarvis", f"Ran: {event.get('command', 'command')}")
 
     client = ElevenLabs(api_key=api_key)
     conversation_holder: dict[str, Any] = {}
@@ -1043,7 +994,6 @@ def run_session(
         handler.note_user_transcript(text)
         emit_state("thinking")
         emit_event({"event": "user", "text": text})
-        notifier.update("You", text)
 
     def on_agent_part(text: str, part_type: Any) -> None:
         nonlocal first_agent_delta
@@ -1064,7 +1014,6 @@ def run_session(
         else:
             emit_state("speaking")
         emit_event({"event": "agent", "text": text})
-        notifier.update("Omarvis", text)
         if text_only:
             session_ended.set()
 
@@ -1089,7 +1038,6 @@ def run_session(
         callback_end_session=on_end,
     )
     conversation_holder["conversation"] = conversation
-    notifier.start(initial_session_notification(text_only))
     emit_state("starting")
     if stop_requested.is_set():
         return 0

@@ -127,49 +127,6 @@ class AudioRecorder:
         return captured
 
 
-class DictationNotifier:
-    def __init__(self, runner: Callable[..., Any] = subprocess.run) -> None:
-        self.runner = runner
-        self.notification_id = ""
-
-    def start(self) -> None:
-        try:
-            completed = self.runner(
-                [
-                    "omarchy-notification-send",
-                    "-p",
-                    "-g",
-                    chr(0xF130),
-                    "Omarvis",
-                    "● Dictating…",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-            if completed.returncode == 0:
-                self.notification_id = completed.stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            pass
-
-    def update(self, text: str) -> None:
-        command = ["omarchy-notification-send"]
-        if self.notification_id:
-            command.extend(("-r", self.notification_id))
-        command.extend(("Omarvis Dictation", text[:240]))
-        try:
-            self.runner(
-                command,
-                timeout=2,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except (OSError, subprocess.SubprocessError):
-            pass
-
-
 def scribe_transcriber(
     api_key: str, config: Mapping[str, Any]
 ) -> Callable[[bytes], str]:
@@ -203,7 +160,6 @@ class DictationService:
         transcriber: Callable[[bytes], str],
         injector: Callable[[str], None],
         cleanup: bool = True,
-        notifier: Any | None = None,
         event_sink: Callable[[Mapping[str, Any]], None] | None = None,
         earcons_enabled: bool = False,
         sound_player: Callable[..., None] = play_sound,
@@ -212,7 +168,6 @@ class DictationService:
         self.transcriber = transcriber
         self.injector = injector
         self.cleanup = cleanup
-        self.notifier = notifier or DictationNotifier()
         self.event_sink = event_sink
         self.earcons_enabled = earcons_enabled
         self.sound_player = sound_player
@@ -242,7 +197,6 @@ class DictationService:
                 self._emit("idle")
                 return "error"
             self._play("mic-open")
-            self.notifier.start()
             self._emit("recording")
             return "recording"
 
@@ -257,7 +211,6 @@ class DictationService:
             try:
                 audio = self.recorder.stop()
             except Exception as error:
-                self.notifier.update(f"Dictation failed: {error}")
                 self._emit("error", message=str(error))
                 self._play("error")
                 self._emit("idle")
@@ -280,11 +233,9 @@ class DictationService:
             if not transcript:
                 raise RuntimeError("No speech was detected")
             self.injector(transcript)
-            self.notifier.update(transcript)
             with self._lock:
                 self._emit("idle", text=transcript)
         except Exception as error:
-            self.notifier.update(f"Dictation failed: {error}")
             with self._lock:
                 self._emit("error", message=str(error))
                 self._play("error")
