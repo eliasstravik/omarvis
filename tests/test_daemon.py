@@ -226,7 +226,7 @@ def test_desktop_browser_launch_is_routed_into_the_managed_browser_session():
         == "ok"
     )
 
-    assert calls[0][-2:] == ("tab", "new")
+    assert calls[0][-2:] == ("tab", "list")
     assert calls[1][-2:] == ("open", "https://google.com")
 
 

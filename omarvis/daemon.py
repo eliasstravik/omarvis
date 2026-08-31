@@ -337,7 +337,11 @@ class RunToolHandler:
         if error is not None:
             return None, error
         command = argv[1:]
-        if command[:1] == ("open",) and not self._browser_tab_owned:
+        if (
+            command[:1] == ("open",)
+            and not self._browser_tab_owned
+            and self._browser_mode == "own-browser"
+        ):
             command = ("tab", "new", *command[1:])
         if command[:1] == ("screenshot",):
             cache_dir = os.path.expanduser(
@@ -447,7 +451,11 @@ class RunToolHandler:
             if decision.argv == ("omarchy", "launch", "browser") and str(
                 self.config.get("browser_mode", "unavailable")
             ) != "unavailable":
-                effective_argv = ("agent-browser", "tab", "new")
+                effective_argv = (
+                    ("agent-browser", "tab", "new")
+                    if self.config.get("browser_mode") == "own-browser"
+                    else ("agent-browser", "tab", "list")
+                )
             execution_argv = effective_argv
             timeout = 3.0
             kill_on_timeout = False
@@ -503,6 +511,11 @@ class RunToolHandler:
                 if (
                     effective_argv[1:2] == ("open",) and not self._browser_tab_owned
                 ) or effective_argv[1:3] == ("tab", "new"):
+                    self._browser_tab_owned = True
+                elif effective_argv[1:3] == ("tab", "list") and self._browser_mode in {
+                    "real-profile",
+                    "omarvis-browser",
+                }:
                     self._browser_tab_owned = True
                 elif effective_argv[1:2] == ("tab",) and effective_argv[2:3] not in {
                     ("list",),
