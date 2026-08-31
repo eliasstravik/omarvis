@@ -473,3 +473,12 @@ def test_ask_scope_never_reaches_confirmation_machinery():
     )
 
     assert decision.kind == "run"
+
+
+@pytest.mark.parametrize("scope", ["agent", "ask"])
+def test_omarvis_see_is_the_only_internal_policy_route(scope):
+    catalog = omarchy_catalog()
+
+    assert decide("omarvis see", catalog=catalog, scope=scope).kind == "run"
+    rejected = decide("omarvis see /tmp/file", catalog=catalog, scope=scope)
+    assert rejected.kind == "reject"

@@ -759,3 +759,84 @@ def test_load_config_deep_merges_dictation_defaults(tmp_path):
         "model_id": "scribe_v2",
         "chunk_size": 500,
     }
+
+
+def test_load_config_deep_merges_vision_defaults(tmp_path):
+    from omarvis.daemon import load_config
+
+    path = tmp_path / "config.json"
+    path.write_text('{"vision":{"enabled":true,"model":"vision-model"}}')
+
+    config = load_config(path)
+
+    assert config["vision"]["enabled"] is True
+    assert config["vision"]["model"] == "vision-model"
+    assert config["vision"]["provider"] == "anthropic"
+    assert config["vision"]["max_tokens"] == 500
+
+
+@pytest.mark.parametrize("scope", ["agent", "ask"])
+def test_omarvis_see_is_intercepted_in_process_and_deletes_screenshot(
+    tmp_path, scope
+):
+    screenshot = tmp_path / "screenshot-test.png"
+    screenshot.write_bytes(b"png")
+    key_path = tmp_path / "vision-key"
+    key_path.write_text("key")
+    calls = []
+
+    def capture(config):
+        calls.append(("capture", config["vision"]["model"]))
+        return screenshot
+
+    def describe(path, config):
+        calls.append(("describe", path.read_bytes(), config["provider"]))
+        return "Two terminal windows are visible."
+
+    def executor(*_args, **_kwargs):
+        raise AssertionError("omarvis see must never be subprocessed")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={
+            "vision": {
+                "enabled": True,
+                "provider": "anthropic",
+                "model": "vision-model",
+                "api_key_path": str(key_path),
+            }
+        },
+        executor=executor,
+        scope=scope,
+        vision_client=describe,
+        screenshot_capture=capture,
+    )
+
+    serialized = handler.handle_client_tool({"command": "omarvis see"})
+    result = json.loads(serialized)
+
+    assert isinstance(serialized, str)
+    assert result["status"] == "ok"
+    assert result["stdout"] == "Two terminal windows are visible."
+    assert calls == [
+        ("capture", "vision-model"),
+        ("describe", b"png", "anthropic"),
+    ]
+    assert not screenshot.exists()
+
+
+def test_omarvis_see_is_clear_when_vision_is_unconfigured():
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("vision should not execute")
+        ),
+    )
+
+    result = handler.handle({"command": "omarvis see"})
+
+    assert result["status"] == "unavailable"
+    assert "Vision is not configured" in result["reason"]

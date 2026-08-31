@@ -112,6 +112,8 @@ class RunToolHandler:
         state_provider: Callable[[], str] | None = None,
         state_refresh_delay: float = 2.0,
         scope: str = "agent",
+        vision_client: Callable[[Path, Mapping[str, Any]], str] | None = None,
+        screenshot_capture: Callable[[Mapping[str, Any]], Path] | None = None,
     ) -> None:
         self.catalog = catalog
         self.dispatchers = frozenset(dispatchers)
@@ -124,6 +126,8 @@ class RunToolHandler:
         self.state_provider = state_provider
         self.state_refresh_delay = state_refresh_delay
         self.scope = scope
+        self.vision_client = vision_client
+        self.screenshot_capture = screenshot_capture
         self._condition = threading.Condition()
         self._pending: PendingConfirmation | None = None
         self._hypr_lua: bool | None = None
@@ -304,6 +308,45 @@ class RunToolHandler:
         self._refresh_thread = threading.Thread(target=push, daemon=True)
         self._refresh_thread.start()
 
+    def _handle_vision(self) -> dict[str, Any]:
+        from .vision import (
+            anthropic_description,
+            capture_screenshot,
+            vision_configuration_error,
+        )
+
+        vision_config = self.config.get("vision", {})
+        if not isinstance(vision_config, Mapping):
+            return {
+                "status": "unavailable",
+                "reason": "Vision is not configured: vision must be a config object.",
+            }
+        configuration_error = vision_configuration_error(vision_config)
+        if configuration_error is not None:
+            return {"status": "unavailable", "reason": configuration_error}
+        screenshot: Path | None = None
+        try:
+            capture = self.screenshot_capture or capture_screenshot
+            describe = self.vision_client or anthropic_description
+            screenshot = capture(self.config)
+            description = describe(screenshot, vision_config).strip()
+            if not description:
+                raise RuntimeError("Vision provider returned no text description")
+            return {
+                "status": "ok",
+                "exit_code": 0,
+                "stdout": description,
+                "stderr": "",
+            }
+        except Exception as error:  # noqa: BLE001 - tool errors become strings
+            return {"status": "failed", "reason": str(error)}
+        finally:
+            if screenshot is not None:
+                try:
+                    screenshot.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
     def handle(self, parameters: Mapping[str, Any]) -> dict[str, Any]:
         try:
             command = str(parameters.get("command", ""))
@@ -325,6 +368,8 @@ class RunToolHandler:
                 return {"status": "needs_confirmation", "command": command}
             with self._condition:
                 self._pending = None
+            if decision.argv == ("omarvis", "see"):
+                return self._handle_vision()
             execution_argv = decision.argv
             timeout = 3.0
             kill_on_timeout = False
@@ -439,11 +484,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "herdr_announcements": True,
     "browser_mode": "unavailable",
     "agent_browser_path": "agent-browser",
+    "profile_path": "~/.config/omarchy/omarvis/profile.md",
     "dictation": {
         "language": "",
         "cleanup": True,
         "model_id": "scribe_v2",
         "chunk_size": 500,
+    },
+    "vision": {
+        "enabled": False,
+        "provider": "anthropic",
+        "model": "",
+        "api_key_path": "~/.config/omarchy/omarvis/vision_api_key",
+        "endpoint": "https://api.anthropic.com/v1/messages",
+        "max_tokens": 500,
     },
 }
 CONFIG_DIR = Path.home() / ".config" / "omarchy" / "omarvis"
@@ -467,6 +521,12 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
             config["dictation"] = {
                 **DEFAULT_CONFIG["dictation"],
                 **configured_dictation,
+            }
+        configured_vision = loaded.get("vision", {})
+        if isinstance(configured_vision, Mapping):
+            config["vision"] = {
+                **DEFAULT_CONFIG["vision"],
+                **configured_vision,
             }
     return config
 

@@ -404,12 +404,24 @@ def decide(
         argv = tuple(shlex.split(command))
     except ValueError:
         return Decision("reject", reason="invalid quoting")
-    if not argv or argv[0] not in {"omarchy", "hyprctl", "herdr", "agent-browser"}:
+    if not argv or argv[0] not in {
+        "omarchy",
+        "hyprctl",
+        "herdr",
+        "agent-browser",
+        "omarvis",
+    }:
         return Decision("reject", reason="unsupported command")
     if scope == "ask":
+        if argv == ("omarvis", "see"):
+            return Decision("run", argv)
         return _decide_ask(command, argv, catalog=catalog)
     if scope != "agent":
         return Decision("reject", reason="unknown policy scope")
+    if argv[0] == "omarvis":
+        if argv == ("omarvis", "see"):
+            return Decision("run", argv)
+        return Decision("reject", reason="unknown Omarvis route")
     if argv and argv[0] == "omarchy":
         route = _omarchy_route(argv, catalog)
         if route is not None:

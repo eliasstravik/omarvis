@@ -6,6 +6,7 @@ PLUGIN_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 CONFIG_DIR="$HOME/.config/omarchy/omarvis"
 CONFIG_PATH="$CONFIG_DIR/config.json"
 KEY_PATH="$CONFIG_DIR/api_key"
+PROFILE_PATH="$CONFIG_DIR/profile.md"
 VENV_DIR="$HOME/.local/share/omarvis/venv"
 BINDINGS_PATH="$HOME/.config/hypr/bindings.lua"
 AGENT_BINDING='o.bind("SUPER + CTRL + J", "Omarvis", "omarchy-shell omarvis toggle")'
@@ -105,16 +106,36 @@ updated=$(jq \
     herdr_announcements: (.herdr_announcements // true),
     browser_mode: $browser_mode,
     agent_browser_path: $agent_browser_path,
+    profile_path: (.profile_path // "~/.config/omarchy/omarvis/profile.md"),
     browser_executable_path: $browser_executable_path,
     dictation: ((.dictation // {}) + {
       language: (.dictation.language // ""),
       cleanup: (.dictation.cleanup // true),
       model_id: (.dictation.model_id // "scribe_v2"),
       chunk_size: (.dictation.chunk_size // 500)
+    }),
+    vision: ((.vision // {}) + {
+      enabled: (.vision.enabled // false),
+      provider: (.vision.provider // "anthropic"),
+      model: (.vision.model // ""),
+      api_key_path: (.vision.api_key_path // "~/.config/omarchy/omarvis/vision_api_key"),
+      endpoint: (.vision.endpoint // "https://api.anthropic.com/v1/messages"),
+      max_tokens: (.vision.max_tokens // 500)
     })
   }' <<<"$existing")
 install -m 600 /dev/null "$CONFIG_PATH"
 printf '%s\n' "$updated" >"$CONFIG_PATH"
+
+if [[ ! -e $PROFILE_PATH ]]; then
+  install -m 600 /dev/null "$PROFILE_PATH"
+  printf '%s\n' \
+    '# Omarvis profile' \
+    '' \
+    '- Preferred name: ' \
+    '- Work and projects: ' \
+    '- Omarchy preferences: ' >"$PROFILE_PATH"
+fi
+echo "Personalize Omarvis memory in $PROFILE_PATH (up to 2000 characters are used)."
 
 cd "$PLUGIN_DIR"
 "$VENV_DIR/bin/python" -m omarvis.provision

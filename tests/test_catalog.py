@@ -17,6 +17,7 @@ from omarvis.catalog import (
     hyprland_prompt,
     load_catalog,
     load_herdr_catalog,
+    profile_memory,
     translate_dispatch,
 )
 
@@ -130,6 +131,20 @@ def test_hyprland_prompt_advertises_read_only_state_queries():
     assert "hyprctl clients -j" in prompt
     assert "hyprctl activewindow -j" in prompt
     assert "hyprctl activeworkspace -j" in prompt
+
+
+def test_profile_memory_uses_configured_path_and_caps_content(tmp_path):
+    path = tmp_path / "profile.md"
+    path.write_text("profile:" + "x" * 3000)
+
+    profile = profile_memory({"profile_path": str(path)})
+
+    assert profile.startswith("profile:")
+    assert len(profile) == 2000
+
+
+def test_missing_profile_memory_is_an_empty_dynamic_variable(tmp_path):
+    assert profile_memory({"profile_path": str(tmp_path / "missing.md")}) == ""
 
 
 @pytest.mark.parametrize(

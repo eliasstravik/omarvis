@@ -21,6 +21,10 @@ def test_conversation_payload_enables_end_call_as_a_system_tool():
     }
     assert tools[1]["type"] == "client"
     assert tools[1]["name"] == "run"
+    placeholders = payload["agent"]["dynamic_variables"][
+        "dynamic_variable_placeholders"
+    ]
+    assert "profile" in placeholders
 
 
 def test_provision_creates_agent_and_ask_agent(monkeypatch):

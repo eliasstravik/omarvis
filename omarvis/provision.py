@@ -17,6 +17,7 @@ DYNAMIC_VARIABLES = (
     "herdr_catalog",
     "browser_catalog",
     "current_state",
+    "profile",
 )
 
 
@@ -48,7 +49,7 @@ def conversation_payload(prompt: str, llm: str) -> dict[str, Any]:
                     {
                         "type": "client",
                         "name": "run",
-                        "description": "Run one policy-approved Omarchy, Hyprland, Herdr, or browser command on the user's computer.",
+                        "description": "Run one policy-approved Omarchy, Hyprland, Herdr, browser, or Omarvis vision command on the user's computer.",
                         "expects_response": True,
                         "response_timeout_secs": 35,
                         "parameters": {
@@ -87,7 +88,7 @@ def manual_steps() -> str:
 - Enable the `end_call` system tool.
 - Add a Client tool named `run` with Wait for response enabled and a 35-second response timeout.
 - `run` parameters: required string `command`; optional boolean `confirmed`.
-- Declare command_catalog, hyprland_dispatchers, herdr_catalog, browser_catalog, and current_state as dynamic variables.
+- Declare command_catalog, hyprland_dispatchers, herdr_catalog, browser_catalog, current_state, and profile as dynamic variables.
 Store both IDs as agent_id and ask_agent_id in ~/.config/omarchy/omarvis/config.json."""
 
 
