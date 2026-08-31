@@ -8,7 +8,7 @@ The plugin exposes one client tool named `run`. Python policy code parses every 
 
 - Omarchy with the current plugin-based `omarchy-shell`
 - An ElevenLabs account and API key
-- Chromium 146 or newer for control of your existing browser profile
+- Chromium (or Chrome) with an existing profile for browser control with your logins
 - Herdr for terminal and coding-agent control
 
 The setup script installs PortAudio, PyAudio, the ElevenLabs Python SDK, and agent-browser 0.34. It creates runtime files under `~/.config/omarchy/omarvis/` and `~/.local/share/omarvis/`. It does not edit this plugin checkout.
@@ -50,11 +50,13 @@ The daemon records the exact parsed argument list, waits for a later user transc
 
 ## Browser setup
 
-To control your existing Chromium profile, open `chrome://inspect/#remote-debugging` and enable remote debugging. Chromium shows an Allow prompt on the first attach and displays an automation banner while attached. If the prompt is still open, Omarvis asks you to click Allow and try again. It does not silently switch to another browser.
+Omarvis picks a browser mode during setup and records it as `browser_mode` in `~/.config/omarchy/omarvis/config.json`:
 
-Existing-profile mode can access any logged-in tab you ask Omarvis to use, including its cookies and account session. Omarvis pins its browser session to one tab so a closed tab produces a `tab_gone` error instead of falling through to another page.
+- `real-profile` (default when a system Chromium/Chrome profile exists): Omarvis opens a separate headed browser window from a snapshot copy of your real profile, made fresh each time the agent-browser daemon starts. Your logins and cookies are available immediately, no remote-debugging consent prompt ever appears, and nothing Omarvis does is written back to your real profile. Set `browser_profile` to a profile name (default `Default`) to snapshot a different profile.
+- `omarvis-browser`: a separate persistent headed profile under `~/.local/share/omarvis/browser-profile` with its own logins. Used when no system browser profile is found; set `browser_profile` to a directory path to relocate it.
+- `own-browser` (manual opt-in): attaches to your running Chromium through `chrome://inspect/#remote-debugging`, which must be enabled there first. This drives your real live browser, but Chromium 146+ shows an Allow prompt on every attach by design — there is no way to suppress it — plus an automation banner while attached. If the prompt is still open, Omarvis asks you to click Allow and try again.
 
-If Chromium is older than 146 or existing-profile access is unavailable during setup, Omarvis uses a separate headed browser profile under `~/.local/share/omarvis/browser-profile`. That profile has separate logins.
+In `real-profile` and `own-browser` modes Omarvis can use your logged-in account sessions, so treat its browser actions accordingly. Omarvis pins its browser session to one tab so a closed tab produces a `tab_gone` error instead of falling through to another page.
 
 ## Privacy
 
@@ -98,7 +100,7 @@ Print the generated prompt context:
 python -m omarvis.catalog --print
 ```
 
-If the browser says approval is pending, click Allow in Chromium and repeat the request. If attachment is rejected, check the remote-debugging toggle and Chromium version.
+In `own-browser` mode, if the browser says approval is pending, click Allow in Chromium and repeat the request; if attachment is rejected, check the remote-debugging toggle and Chromium version. In `real-profile` mode, log in to sites in your normal browser first — the snapshot picks up whatever your real profile is logged into at daemon start.
 
 Removing the Omarvis widget from the bar removes the plugin's only entry from `shell.json`. Omarchy then unmounts the service, so the hotkey stops working. Restore it with:
 

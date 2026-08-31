@@ -193,6 +193,12 @@ class RunToolHandler:
         )
         if self._browser_mode == "own-browser":
             return common + ("--auto-connect",)
+        if self._browser_mode == "real-profile":
+            # A Chrome profile NAME makes agent-browser launch a separate
+            # window from a snapshot copy of that profile: logins carry over,
+            # nothing is written back, and no debugging consent prompt appears.
+            profile_name = str(self.config.get("browser_profile") or "Default")
+            return common + ("--profile", profile_name, "--headed")
         profile = os.path.expanduser(
             str(
                 self.config.get("browser_profile")
@@ -207,7 +213,7 @@ class RunToolHandler:
         configured = str(self.config.get("browser_mode", "unavailable"))
         if configured == "unavailable":
             return {"status": "failed", "reason": "browser-unavailable"}
-        if configured == "omarvis-browser":
+        if configured in {"omarvis-browser", "real-profile"}:
             self._browser_mode = configured
             return None
         path = str(self.config.get("agent_browser_path") or "agent-browser")
