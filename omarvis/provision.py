@@ -19,9 +19,12 @@ DYNAMIC_VARIABLES = (
     "current_state",
     "profile",
 )
+DEFAULT_VOICE_ID = str(DEFAULT_CONFIG["voice_id"])
 
 
-def conversation_payload(prompt: str, llm: str) -> dict[str, Any]:
+def conversation_payload(
+    prompt: str, llm: str, voice_id: str = DEFAULT_VOICE_ID
+) -> dict[str, Any]:
     return {
         "turn": {
             "turn_timeout": 20.0,
@@ -35,6 +38,7 @@ def conversation_payload(prompt: str, llm: str) -> dict[str, Any]:
                 "max_files_per_conversation": 10,
             },
         },
+        "tts": {"voice_id": voice_id},
         "agent": {
             "first_message": "",
             "language": "en",
@@ -95,6 +99,7 @@ def manual_steps() -> str:
 - System prompts: paste agent/prompt.md for Omarvis and agent/prompt-ask.md for Omarvis Ask.
 - LLM: GPT-5.6 Sol (`gpt-5.6-sol`).
 - First message: empty. Language: English.
+- Voice ID: `JSWO6cw2AyFE324d5kEr`.
 - Turn timeout: 20 seconds. Silence end-call timeout: 30 seconds. Maximum duration: 300 seconds.
 - Enable file input with at most 3 files in memory and 10 files per conversation.
 - Enable the `end_call` system tool.
@@ -133,8 +138,11 @@ def provision(config: dict[str, Any], api_key: str) -> str:
             "The ElevenLabs SDK is missing. Run bin/omarvis-setup.\n" + manual_steps()
         ) from error
     client = ElevenLabs(api_key=api_key)
+    voice_id = str(config.get("voice_id") or DEFAULT_VOICE_ID)
     agent_config = ConversationalConfig.model_validate(
-        conversation_payload(PROMPT_PATH.read_text(), str(config["llm"]))
+        conversation_payload(
+            PROMPT_PATH.read_text(), str(config["llm"]), voice_id
+        )
     )
     agent_id = _upsert_agent(
         client,
@@ -146,7 +154,9 @@ def provision(config: dict[str, Any], api_key: str) -> str:
     save_config(config)
 
     ask_config = ConversationalConfig.model_validate(
-        conversation_payload(ASK_PROMPT_PATH.read_text(), str(config["llm"]))
+        conversation_payload(
+            ASK_PROMPT_PATH.read_text(), str(config["llm"]), voice_id
+        )
     )
     config["ask_agent_id"] = _upsert_agent(
         client,
