@@ -95,6 +95,28 @@ def test_herdr_agent_state_is_compacted_for_spoken_context():
     ]
 
 
+@pytest.mark.parametrize(
+    "cwd, shortened",
+    [
+        ("/Users/another-user/project", "~/project"),
+        ("/home/another-user/project", "~/project"),
+        ("/opt/shared/project", "/opt/shared/project"),
+    ],
+)
+def test_herdr_agent_paths_are_compacted_across_hosts(cwd, shortened):
+    payload = {
+        "result": {
+            "agents": [
+                {"pane_id": "w1:p1", "agent": "codex", "agent_status": "idle", "cwd": cwd}
+            ]
+        }
+    }
+
+    assert compact_herdr_agents(payload) == [
+        f"w1:p1 codex idle cwd={shortened}"
+    ]
+
+
 def test_hyprland_prompt_documents_closing_windows():
     prompt = hyprland_prompt()
 

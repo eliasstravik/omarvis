@@ -1,11 +1,17 @@
 import json
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
 from omarvis.catalog import catalog_from_data
-from omarvis.daemon import ExecutionResult, RunToolHandler, compact_browser_tabs
+from omarvis.daemon import (
+    ExecutionResult,
+    RunToolHandler,
+    compact_browser_tabs,
+    wait_for_conversation_connection,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -14,6 +20,29 @@ def omarchy_catalog():
     return catalog_from_data(
         json.loads((FIXTURES / "omarchy-commands.json").read_text())
     )
+
+
+def test_conversation_connection_waits_for_the_sdk_websocket():
+    class Thread:
+        @staticmethod
+        def is_alive():
+            return True
+
+    conversation = type("Conversation", (), {"_ws": object(), "_thread": Thread()})()
+
+    wait_for_conversation_connection(conversation, threading.Event(), timeout=0.01)
+
+
+def test_conversation_connection_fails_if_the_sdk_thread_exits():
+    class Thread:
+        @staticmethod
+        def is_alive():
+            return False
+
+    conversation = type("Conversation", (), {"_ws": None, "_thread": Thread()})()
+
+    with pytest.raises(RuntimeError, match="ended before it became ready"):
+        wait_for_conversation_connection(conversation, threading.Event(), timeout=0.01)
 
 
 def test_run_tool_enforces_a_user_turn_before_confirmation():
@@ -185,8 +214,10 @@ def test_browser_snapshot_budget_and_screenshot_path_are_daemon_owned(tmp_path):
 
 def test_herdr_json_results_are_compacted_before_returning_to_the_agent():
     payload = (FIXTURES / "herdr-agent-list.json").read_text()
+    limits = []
 
     def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        limits.append(stdout_limit)
         return ExecutionResult(0, payload, "")
 
     handler = RunToolHandler(
@@ -205,6 +236,96 @@ def test_herdr_json_results_are_compacted_before_returning_to_the_agent():
         "w58:p6 claude blocked cwd=~/dev/omarvis"
     )
     assert len(result["stdout"]) <= 600
+    assert limits == [64_000]
+
+
+def test_hyprland_client_json_is_not_truncated_before_compaction():
+    clients = [
+        {
+            "class": f"app-{index}",
+            "title": "x" * 200,
+            "workspace": {"id": index},
+        }
+        for index in range(20)
+    ]
+    limits = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        limits.append(stdout_limit)
+        return ExecutionResult(0, json.dumps(clients), "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+    result = handler.handle({"command": "hyprctl clients -j"})
+
+    assert result["status"] == "ok"
+    assert result["stdout"].startswith("app-0 — ")
+    assert not result["stdout"].startswith("[")
+    assert limits == [64_000]
+
+
+def test_herdr_create_response_keeps_resource_ids_parseable():
+    payload = json.dumps(
+        {
+            "id": "cli:tab:create",
+            "result": {
+                "root_pane": {
+                    "pane_id": "w1:p2",
+                    "tab_id": "w1:t2",
+                    "workspace_id": "w1",
+                    "cwd": "/home/example/project",
+                    "terminal_id": "term_example",
+                    "agent_status": "unknown",
+                    "focused": False,
+                    "foreground_cwd": "/home/example/project",
+                    "revision": 0,
+                    "scroll": {
+                        "max_offset_from_bottom": 0,
+                        "offset_from_bottom": 0,
+                        "viewport_rows": 50,
+                    },
+                },
+                "tab": {
+                    "tab_id": "w1:t2",
+                    "workspace_id": "w1",
+                    "label": "omarvis-e2e",
+                    "number": 2,
+                    "pane_count": 1,
+                    "focused": False,
+                    "agent_status": "unknown",
+                },
+                "type": "tab_created",
+            },
+        }
+    )
+    limits = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        limits.append(stdout_limit)
+        return ExecutionResult(0, payload, "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers=set(),
+        config={},
+        executor=executor,
+        confirmation_wait=0,
+    )
+
+    result = handler.handle(
+        {"command": "herdr tab create --workspace w1 --label omarvis-e2e --no-focus"}
+    )
+
+    decoded = json.loads(result["stdout"])
+    assert decoded["root_pane"]["pane_id"] == "w1:p2"
+    assert decoded["tab"]["tab_id"] == "w1:t2"
+    assert limits == [64_000]
 
 
 def _wait_for(predicate, timeout=2.0):

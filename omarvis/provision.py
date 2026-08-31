@@ -37,14 +37,13 @@ def conversation_payload(prompt: str, llm: str) -> dict[str, Any]:
             "prompt": {
                 "prompt": prompt,
                 "llm": llm,
-                "built_in_tools": {
-                    "end_call": {
+                "tools": [
+                    {
                         "type": "system",
                         "name": "end_call",
+                        "description": "",
                         "params": {"system_tool_type": "end_call"},
-                    }
-                },
-                "tools": [
+                    },
                     {
                         "type": "client",
                         "name": "run",

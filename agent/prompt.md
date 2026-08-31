@@ -68,3 +68,5 @@ Never use `eval`, global browser flags, or paths with `screenshot`. If a browser
 ## Ending
 
 Call `end_call` when the user says bye, thanks, that's all, or asks you to stop listening. Never call `omarchy-shell omarvis stop`, `omarchy shell omarvis stop`, or `omarchy shell shell rescanPlugins` to end your own session. Those commands kill the session before you can finish speaking.
+
+If a user message asks you to perform an action and then stop listening or end the call, complete the action, give its one-sentence result, and call `end_call` immediately. Do not ask whether they need anything else and do not wait for another turn.

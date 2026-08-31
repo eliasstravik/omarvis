@@ -9,6 +9,7 @@ Item {
   property string lastUser: ""
   property string lastAgent: ""
   property string lastError: ""
+  property bool stopRequested: false
   readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/$/, "")
 
   function handleEvent(line) {
@@ -31,6 +32,7 @@ Item {
   function start(): string {
     if (daemon.running) return "already-running"
     killTimer.stop()
+    root.stopRequested = false
     root.lastError = ""
     root.sessionState = "starting"
     daemon.running = true
@@ -39,6 +41,7 @@ Item {
 
   function stop(): string {
     if (!daemon.running) return "not-running"
+    root.stopRequested = true
     daemon.signal(15)
     killTimer.restart()
     return "stopping"
@@ -59,15 +62,17 @@ Item {
     }
     onExited: function(exitCode, exitStatus) {
       killTimer.stop()
-      root.sessionState = exitCode === 0 ? "idle" : "error"
-      if (exitCode !== 0 && !root.lastError)
+      var expectedStop = root.stopRequested
+      root.stopRequested = false
+      root.sessionState = expectedStop || exitCode === 0 ? "idle" : "error"
+      if (!expectedStop && exitCode !== 0 && !root.lastError)
         root.lastError = "Daemon exited with code " + exitCode
     }
   }
 
   Timer {
     id: killTimer
-    interval: 5000
+    interval: 8000
     repeat: false
     onTriggered: if (daemon.running) daemon.signal(9)
   }

@@ -130,9 +130,17 @@ def browser_catalog() -> Catalog:
 def _short_path(value: Any) -> str:
     text = str(value or "unknown")
     home = str(Path.home())
-    return (
-        "~" + text[len(home) :] if text == home or text.startswith(home + "/") else text
-    )
+    if text == home or text.startswith(home + "/"):
+        return "~" + text[len(home) :]
+
+    # Herdr state may originate on another host (for example when restoring a
+    # workspace created on macOS). Keep the spoken context compact and avoid
+    # exposing a username merely because that host uses a different home root.
+    parts = Path(text).parts
+    if len(parts) >= 3 and parts[:2] in (("/", "Users"), ("/", "home")):
+        return "~" + ("/" + "/".join(parts[3:]) if len(parts) > 3 else "")
+
+    return text
 
 
 def compact_herdr_agents(payload: Mapping[str, Any], *, limit: int = 30) -> list[str]:

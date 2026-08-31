@@ -301,8 +301,13 @@ class RunToolHandler:
             timeout = 3.0
             kill_on_timeout = False
             stdout_limit = 400
+            execution_stdout_limit = stdout_limit
             if decision.argv[:2] == ("hyprctl", "clients"):
                 stdout_limit = 1500
+                execution_stdout_limit = 64_000
+            elif decision.argv[:1] == ("herdr",):
+                stdout_limit = 600
+                execution_stdout_limit = 64_000
             if decision.argv[:2] == ("hyprctl", "dispatch") and (
                 self._hyprland_speaks_lua()
             ):
@@ -316,11 +321,12 @@ class RunToolHandler:
                 timeout = 30.0
                 kill_on_timeout = True
                 stdout_limit = 6000 if decision.argv[1:2] == ("snapshot",) else 3000
+                execution_stdout_limit = stdout_limit
             result = self.executor(
                 execution_argv,
                 timeout=timeout,
                 kill_on_timeout=kill_on_timeout,
-                stdout_limit=stdout_limit,
+                stdout_limit=execution_stdout_limit,
             )
             if result.timed_out:
                 return {"status": "failed", "reason": "timeout"}
@@ -611,6 +617,26 @@ def _end_conversation(conversation: Any) -> None:
         conversation.wait_for_session_end()
 
 
+def wait_for_conversation_connection(
+    conversation: Any,
+    stop_requested: threading.Event,
+    *,
+    timeout: float = 15.0,
+) -> None:
+    """Wait until the SDK's background thread has opened its WebSocket."""
+    deadline = time.monotonic() + timeout
+    while not stop_requested.is_set() and time.monotonic() < deadline:
+        if getattr(conversation, "_ws", None) is not None:
+            return
+        thread = getattr(conversation, "_thread", None)
+        if thread is not None and not thread.is_alive():
+            raise RuntimeError("ElevenLabs connection ended before it became ready")
+        stop_requested.wait(0.05)
+    if stop_requested.is_set():
+        raise RuntimeError("Omarvis stopped before ElevenLabs connected")
+    raise RuntimeError("Timed out waiting for ElevenLabs to connect")
+
+
 def run_session(
     config: Mapping[str, Any], api_key: str, *, text_only: bool, messages: Sequence[str]
 ) -> int:
@@ -693,34 +719,35 @@ def run_session(
     if stop_requested.is_set():
         return 0
     conversation.start_session()
-    if stop_requested.is_set():
-        session_ended.set()
     watcher = None
-    if config.get("herdr_announcements", True) and not stop_requested.is_set():
-        watcher = threading.Thread(
-            target=watch_herdr,
-            args=(stop_requested, contextual_updates),
-            daemon=True,
+    try:
+        wait_for_conversation_connection(conversation, stop_requested)
+        if config.get("herdr_announcements", True) and not stop_requested.is_set():
+            watcher = threading.Thread(
+                target=watch_herdr,
+                args=(stop_requested, contextual_updates),
+                daemon=True,
+            )
+            watcher.start()
+        emit_event({"event": "state", "state": "listening"})
+        for message in messages:
+            conversation.send_user_message(message)
+        while not stop_requested.is_set() and not session_ended.is_set():
+            try:
+                update = contextual_updates.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            conversation.send_contextual_update(update)
+    finally:
+        stop_requested.set()
+        teardown = threading.Thread(
+            target=_end_conversation, args=(conversation,), daemon=True
         )
-        watcher.start()
-    emit_event({"event": "state", "state": "listening"})
-    for message in messages:
-        conversation.send_user_message(message)
-    while not stop_requested.is_set() and not session_ended.is_set():
-        try:
-            update = contextual_updates.get(timeout=0.2)
-        except queue.Empty:
-            continue
-        conversation.send_contextual_update(update)
-    teardown = threading.Thread(
-        target=_end_conversation, args=(conversation,), daemon=True
-    )
-    teardown.start()
-    teardown.join(5.0)
-    stop_requested.set()
-    if watcher is not None:
-        watcher.join(5.0)
-    emit_event({"event": "state", "state": "idle"})
+        teardown.start()
+        teardown.join(5.0)
+        if watcher is not None:
+            watcher.join(5.0)
+        emit_event({"event": "state", "state": "idle"})
     return 0
 
 
