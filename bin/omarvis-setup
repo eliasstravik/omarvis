@@ -8,7 +8,8 @@ CONFIG_PATH="$CONFIG_DIR/config.json"
 KEY_PATH="$CONFIG_DIR/api_key"
 VENV_DIR="$HOME/.local/share/omarvis/venv"
 BINDINGS_PATH="$HOME/.config/hypr/bindings.lua"
-BINDING='o.bind("SUPER + CTRL + J", "Omarvis", "omarchy-shell omarvis toggle")'
+AGENT_BINDING='o.bind("SUPER + CTRL + J", "Omarvis", "omarchy-shell omarvis toggle")'
+ASK_BINDING='o.bind("SUPER + SHIFT + J", "Omarvis Ask", "omarchy-shell omarvis toggle ask")'
 
 need_command() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -87,6 +88,7 @@ updated=$(jq \
   --arg browser_executable_path "$BROWSER_EXECUTABLE" \
   '. + {
     agent_id: (.agent_id // ""),
+    ask_agent_id: (.ask_agent_id // ""),
     llm: (.llm // "gpt-5.6-sol"),
     input_device_index: (.input_device_index // null),
     herdr_announcements: (.herdr_announcements // true),
@@ -101,14 +103,21 @@ cd "$PLUGIN_DIR"
 "$VENV_DIR/bin/python" -m omarvis.provision
 
 echo
-echo "Hotkey binding:"
-echo "$BINDING"
-if [[ -f $BINDINGS_PATH ]] && ! grep -Fq 'omarchy-shell omarvis toggle' "$BINDINGS_PATH"; then
-  read -r -p "Append this binding to $BINDINGS_PATH? [y/N] " answer
+echo "Hotkey bindings:"
+echo "$AGENT_BINDING"
+echo "$ASK_BINDING"
+missing_bindings=()
+if [[ -f $BINDINGS_PATH ]]; then
+  grep -Fq 'omarchy-shell omarvis toggle")' "$BINDINGS_PATH" || missing_bindings+=("$AGENT_BINDING")
+  grep -Fq 'omarchy-shell omarvis toggle ask")' "$BINDINGS_PATH" || missing_bindings+=("$ASK_BINDING")
+fi
+if (( ${#missing_bindings[@]} > 0 )); then
+  read -r -p "Append the missing bindings to $BINDINGS_PATH? [y/N] " answer
   if [[ $answer == [yY] || $answer == [yY][eE][sS] ]]; then
     backup="$BINDINGS_PATH.$(date +%Y%m%d-%H%M%S).bak"
     cp "$BINDINGS_PATH" "$backup"
-    printf '\n%s\n' "$BINDING" >>"$BINDINGS_PATH"
+    printf '\n' >>"$BINDINGS_PATH"
+    printf '%s\n' "${missing_bindings[@]}" >>"$BINDINGS_PATH"
     echo "Updated bindings. Backup: $backup"
   fi
 fi

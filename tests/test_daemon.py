@@ -696,3 +696,50 @@ def test_client_tool_result_is_serialized_for_the_elevenlabs_protocol():
         "status": "started",
         "command": "omarchy launch terminal herdr",
     }
+
+
+def test_run_tool_handler_passes_ask_scope_to_policy():
+    calls = []
+
+    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
+        calls.append(tuple(argv))
+        return ExecutionResult(0, "", "")
+
+    handler = RunToolHandler(
+        catalog=omarchy_catalog(),
+        dispatchers={"killactive"},
+        config={},
+        executor=executor,
+        confirmation_wait=0,
+        scope="ask",
+    )
+
+    result = handler.handle({"command": "hyprctl dispatch killactive"})
+
+    assert result["status"] == "rejected"
+    assert "ask mode" in result["reason"]
+    assert calls == []
+
+
+def test_main_defaults_to_agent_mode_and_accepts_ask_mode(monkeypatch):
+    from omarvis import daemon
+
+    calls = []
+    monkeypatch.setattr(
+        daemon,
+        "load_config",
+        lambda: {"agent_id": "agent-id", "ask_agent_id": "ask-id"},
+    )
+    monkeypatch.setattr(daemon, "load_api_key", lambda: "key")
+
+    def fake_run_session(config, api_key, **options):
+        calls.append((config, api_key, options))
+        return 0
+
+    monkeypatch.setattr(daemon, "run_session", fake_run_session)
+
+    assert daemon.main([]) == 0
+    assert daemon.main(["--mode", "agent"]) == 0
+    assert daemon.main(["--mode", "ask"]) == 0
+    assert [call[2]["mode"] for call in calls] == ["agent", "agent", "ask"]
+    assert calls[0] == calls[1]

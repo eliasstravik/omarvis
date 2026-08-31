@@ -106,6 +106,40 @@ BROWSER_GET_ALLOW = frozenset(
 BROWSER_IS_ALLOW = frozenset({"visible", "enabled", "checked"})
 BROWSER_CONFIRM = frozenset({("close",), ("download",), ("upload",), ("drag",)})
 
+ASK_HERDR_ROUTES = frozenset(
+    route
+    for route in HERDR_ALLOW
+    if route == ("status",)
+    or route == ("api", "snapshot")
+    or route[-1]
+    in {"list", "get", "read", "explain", "process-info", "neighbor", "edges"}
+)
+ASK_BROWSER_ROUTES = frozenset(
+    {
+        ("snapshot",),
+        ("tab", "list"),
+        ("screenshot",),
+        ("scroll",),
+        ("scrollintoview",),
+        *(("get", command) for command in BROWSER_GET_ALLOW),
+        *(("is", command) for command in BROWSER_IS_ALLOW),
+    }
+)
+ASK_OMARCHY_ROUTES = frozenset(
+    {
+        ("omarchy", "capture", "text"),
+        ("omarchy", "capture", "screenshot"),
+        ("omarchy", "theme", "current"),
+        ("omarchy", "theme", "list"),
+        ("omarchy", "system", "stats"),
+        ("omarchy", "commands"),
+    }
+)
+ASK_REFUSAL_REASON = (
+    "Omarvis is in ask mode and cannot perform that action; "
+    "tell the user to press SUPER + CTRL + J for Agent mode."
+)
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -305,6 +339,53 @@ def _decide_browser(
     return Decision("run", argv)
 
 
+def _omarchy_route(
+    argv: tuple[str, ...], catalog: Catalog
+) -> tuple[str, ...] | None:
+    for size in range(len(argv), 0, -1):
+        candidate = argv[:size]
+        if candidate in catalog.routes or candidate in catalog.aliases:
+            return catalog.aliases.get(candidate, candidate)
+    return None
+
+
+def _decide_ask(
+    command: str,
+    argv: tuple[str, ...],
+    *,
+    catalog: Catalog,
+) -> Decision:
+    if argv[0] == "hyprctl" and argv in HYPR_READ_COMMANDS:
+        return Decision("run", argv)
+    if argv[0] == "herdr":
+        route = (argv[1],) if len(argv) > 1 and argv[1] == "status" else tuple(argv[1:3])
+        if route in ASK_HERDR_ROUTES:
+            arguments = argv[1 + len(route) :]
+            if not any(
+                token in {"--wait", "--remote", "--session"}
+                or token.startswith("--until")
+                for token in arguments
+            ):
+                return Decision("run", argv)
+    if argv[0] == "agent-browser":
+        matched = _browser_route(argv)
+        if matched is not None and matched[0] in ASK_BROWSER_ROUTES:
+            decision = _decide_browser(
+                command,
+                argv,
+                confirmed=False,
+                pending=None,
+                now=time.monotonic(),
+            )
+            if decision.kind == "run":
+                return decision
+    if argv[0] == "omarchy":
+        route = _omarchy_route(argv, catalog)
+        if route in ASK_OMARCHY_ROUTES or argv[:2] == ("omarchy", "commands"):
+            return Decision("run", argv)
+    return Decision("reject", reason=ASK_REFUSAL_REASON)
+
+
 def decide(
     command: str,
     *,
@@ -313,6 +394,7 @@ def decide(
     pending: PendingConfirmation | None = None,
     now: float | None = None,
     dispatchers: set[str] | frozenset[str] = frozenset(),
+    scope: str = "agent",
 ) -> Decision:
     if any(character in command for character in ("\n", "\r", "\0")):
         return Decision("reject", reason="control character")
@@ -324,20 +406,22 @@ def decide(
         return Decision("reject", reason="invalid quoting")
     if not argv or argv[0] not in {"omarchy", "hyprctl", "herdr", "agent-browser"}:
         return Decision("reject", reason="unsupported command")
+    if scope == "ask":
+        return _decide_ask(command, argv, catalog=catalog)
+    if scope != "agent":
+        return Decision("reject", reason="unknown policy scope")
     if argv and argv[0] == "omarchy":
-        for size in range(len(argv), 0, -1):
-            candidate = argv[:size]
-            if candidate in catalog.routes or candidate in catalog.aliases:
-                route = catalog.aliases.get(candidate, candidate)
-                if _omarchy_requires_confirmation(argv, route):
-                    return _confirmation_decision(
-                        command,
-                        argv,
-                        confirmed=confirmed,
-                        pending=pending,
-                        now=time.monotonic() if now is None else now,
-                    )
-                return Decision("run", argv)
+        route = _omarchy_route(argv, catalog)
+        if route is not None:
+            if _omarchy_requires_confirmation(argv, route):
+                return _confirmation_decision(
+                    command,
+                    argv,
+                    confirmed=confirmed,
+                    pending=pending,
+                    now=time.monotonic() if now is None else now,
+                )
+            return Decision("run", argv)
     if argv[0] == "hyprctl":
         if argv in HYPR_READ_COMMANDS:
             return Decision("run", argv)

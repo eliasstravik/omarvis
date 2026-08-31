@@ -8,7 +8,9 @@ BarWidget {
 
   property var svc: null
   readonly property string sessionState: svc ? svc.sessionState : "idle"
+  readonly property string currentMode: svc ? svc.currentMode : "agent"
   readonly property string glyphText: {
+    if (currentMode === "ask" && sessionState !== "idle") return String.fromCodePoint(0xF02D6)
     if (sessionState === "speaking") return String.fromCodePoint(0xF057E)
     if (sessionState === "idle") return String.fromCodePoint(0xF036D)
     return String.fromCodePoint(0xF036C)
@@ -26,7 +28,7 @@ BarWidget {
   }
 
   function tooltipText() {
-    var text = root.sessionState
+    var text = root.currentMode + ": " + root.sessionState
     if (root.svc && root.svc.lastUser) text += "\nYou: " + root.svc.lastUser
     if (root.svc && root.svc.lastAgent) text += "\nOmarvis: " + root.svc.lastAgent
     if (root.svc && root.svc.lastError) text += "\n" + root.svc.lastError

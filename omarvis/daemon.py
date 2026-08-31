@@ -111,6 +111,7 @@ class RunToolHandler:
         event_sink: Callable[[Mapping[str, Any]], None] | None = None,
         state_provider: Callable[[], str] | None = None,
         state_refresh_delay: float = 2.0,
+        scope: str = "agent",
     ) -> None:
         self.catalog = catalog
         self.dispatchers = frozenset(dispatchers)
@@ -122,6 +123,7 @@ class RunToolHandler:
         self.event_sink = event_sink
         self.state_provider = state_provider
         self.state_refresh_delay = state_refresh_delay
+        self.scope = scope
         self._condition = threading.Condition()
         self._pending: PendingConfirmation | None = None
         self._hypr_lua: bool | None = None
@@ -313,6 +315,7 @@ class RunToolHandler:
                 confirmed=confirmed,
                 pending=self._pending_for_decision(confirmed),
                 now=self.clock(),
+                scope=self.scope,
             )
             if decision.kind == "reject":
                 return {"status": "rejected", "reason": decision.reason}
@@ -430,6 +433,7 @@ class RunToolHandler:
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "agent_id": "",
+    "ask_agent_id": "",
     "llm": "gpt-5.6-sol",
     "input_device_index": None,
     "herdr_announcements": True,
@@ -663,7 +667,12 @@ def wait_for_conversation_connection(
 
 
 def run_session(
-    config: Mapping[str, Any], api_key: str, *, text_only: bool, messages: Sequence[str]
+    config: Mapping[str, Any],
+    api_key: str,
+    *,
+    text_only: bool,
+    messages: Sequence[str],
+    mode: str = "agent",
 ) -> int:
     from elevenlabs import ElevenLabs
     from elevenlabs.conversational_ai.conversation import (
@@ -683,6 +692,9 @@ def run_session(
     session_ended = threading.Event()
     contextual_updates: queue.Queue[str] = queue.Queue()
     notifier = Notifier()
+
+    def emit_state(state: str) -> None:
+        emit_event({"event": "state", "state": state, "mode": mode})
 
     def request_stop(_signum: int, _frame: Any) -> None:
         stop_requested.set()
@@ -705,18 +717,19 @@ def run_session(
         context_sink=contextual_updates.put,
         event_sink=on_tool_event,
         state_provider=desktop_state,
+        scope=mode,
     )
     client_tools = ClientTools()
     client_tools.register("run", handler.handle_client_tool)
 
     def on_user(text: str) -> None:
         handler.note_user_transcript(text)
-        emit_event({"event": "state", "state": "listening"})
+        emit_state("listening")
         emit_event({"event": "user", "text": text})
         notifier.update("You", text)
 
     def on_agent(text: str) -> None:
-        emit_event({"event": "state", "state": "speaking"})
+        emit_state("speaking")
         emit_event({"event": "agent", "text": text})
         notifier.update("Omarvis", text)
 
@@ -730,7 +743,7 @@ def run_session(
     )
     conversation = Conversation(
         client=ElevenLabs(api_key=api_key),
-        agent_id=str(config["agent_id"]),
+        agent_id=str(config["ask_agent_id"] if mode == "ask" else config["agent_id"]),
         requires_auth=True,
         audio_interface=audio_interface,
         config=ConversationInitiationData(dynamic_variables=variables),
@@ -740,7 +753,7 @@ def run_session(
         callback_end_session=on_end,
     )
     notifier.start()
-    emit_event({"event": "state", "state": "starting"})
+    emit_state("starting")
     if stop_requested.is_set():
         return 0
     conversation.start_session()
@@ -754,7 +767,7 @@ def run_session(
                 daemon=True,
             )
             watcher.start()
-        emit_event({"event": "state", "state": "listening"})
+        emit_state("listening")
         for message in messages:
             conversation.send_user_message(message)
         while not stop_requested.is_set() and not session_ended.is_set():
@@ -772,7 +785,7 @@ def run_session(
         teardown.join(5.0)
         if watcher is not None:
             watcher.join(5.0)
-        emit_event({"event": "state", "state": "idle"})
+        emit_state("idle")
     return 0
 
 
@@ -781,16 +794,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--list-devices", action="store_true")
     parser.add_argument("--text-only", action="store_true")
     parser.add_argument("--message", action="append", default=[])
+    parser.add_argument("--mode", choices=("agent", "ask"), default="agent")
     arguments = parser.parse_args(argv)
     if arguments.list_devices:
         return list_devices()
     try:
         config = load_config()
-        if not config.get("agent_id"):
+        agent_key = "ask_agent_id" if arguments.mode == "ask" else "agent_id"
+        if not config.get(agent_key):
+            message = (
+                "Omarvis is not provisioned. Run bin/omarvis-setup."
+                if arguments.mode == "agent"
+                else "Omarvis ask mode is not provisioned. Run bin/omarvis-setup."
+            )
             emit_event(
                 {
                     "event": "error",
-                    "message": "Omarvis is not provisioned. Run bin/omarvis-setup.",
+                    "message": message,
                 }
             )
             return 2
@@ -804,7 +824,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
         return run_session(
-            config, api_key, text_only=arguments.text_only, messages=arguments.message
+            config,
+            api_key,
+            text_only=arguments.text_only,
+            messages=arguments.message,
+            mode=arguments.mode,
         )
     except Exception as error:  # noqa: BLE001 - keep the CLI failure machine-readable
         emit_event({"event": "error", "message": str(error)})
