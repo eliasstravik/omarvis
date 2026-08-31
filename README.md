@@ -30,6 +30,7 @@ Setup prints the J-key family and can append any missing bindings after making a
 ```lua
 o.bind("SUPER + CTRL + J", "Omarvis", "omarchy-shell omarvis toggle")
 o.bind("SUPER + SHIFT + J", "Omarvis Ask", "omarchy-shell omarvis toggle ask")
+hl.unbind("SUPER + J") -- replaces Omarchy's Toggle window split binding where present
 o.bind("SUPER + J", "Omarvis Dictate", "omarchy-shell omarvis dictate start")
 o.bind("SUPER + J", "Omarvis Dictate Stop", "omarchy-shell omarvis dictate stop", { release = true })
 o.bind("SUPER + ALT + J", "Omarvis Text", "<plugin-dir>/bin/omarvis-text")
