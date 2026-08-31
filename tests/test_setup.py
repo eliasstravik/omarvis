@@ -26,3 +26,9 @@ def test_setup_removes_legacy_external_vision_configuration():
     assert "del(.vision)" in script
     assert "anthropic" not in script.lower()
     assert "vision_api_key" not in script
+
+
+def test_setup_defaults_both_agents_to_the_omarvis_voice():
+    script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
+
+    assert 'voice_id: (.voice_id // "JSWO6cw2AyFE324d5kEr")' in script

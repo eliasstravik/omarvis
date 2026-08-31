@@ -26,6 +26,7 @@ def test_conversation_payload_enables_end_call_as_a_system_tool():
         "max_files_in_memory": 3,
         "max_files_per_conversation": 10,
     }
+    assert payload["tts"]["voice_id"] == "JSWO6cw2AyFE324d5kEr"
     placeholders = payload["agent"]["dynamic_variables"][
         "dynamic_variable_placeholders"
     ]
@@ -56,4 +57,7 @@ def test_provision_creates_agent_and_ask_agent(monkeypatch):
     assert config["agent_id"] == "omarvis-id"
     assert config["ask_agent_id"] == "omarvis-ask-id"
     assert [name for name, _payload in creates] == ["Omarvis", "Omarvis Ask"]
+    assert {
+        payload.tts.voice_id for _name, payload in creates
+    } == {"JSWO6cw2AyFE324d5kEr"}
     assert "read-only teacher" in creates[1][1].agent.prompt.prompt

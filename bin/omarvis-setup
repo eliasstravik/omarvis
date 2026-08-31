@@ -105,6 +105,7 @@ updated=$(jq \
     agent_id: (.agent_id // ""),
     ask_agent_id: (.ask_agent_id // ""),
     llm: (.llm // "gpt-5.6-sol"),
+    voice_id: (.voice_id // "JSWO6cw2AyFE324d5kEr"),
     input_device_index: (.input_device_index // null),
     herdr_announcements: (.herdr_announcements // true),
     browser_mode: $browser_mode,

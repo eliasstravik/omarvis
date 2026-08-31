@@ -591,6 +591,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "agent_id": "",
     "ask_agent_id": "",
     "llm": "gpt-5.6-sol",
+    "voice_id": "JSWO6cw2AyFE324d5kEr",
     "input_device_index": None,
     "herdr_announcements": True,
     "browser_mode": "unavailable",
