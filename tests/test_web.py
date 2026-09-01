@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import http.client
-import hashlib
 import json
 import re
 import stat
@@ -594,18 +593,27 @@ def test_phone_page_ships_its_own_nerd_font_and_shares_the_hud_vocabulary() -> N
     assert "pagehide" in page
 
 
-def test_vendored_browser_sdk_matches_recorded_integrity() -> None:
-    bundle = (
-        Path(__file__).parents[1]
-        / "assets"
-        / "web"
-        / "vendor"
-        / "elevenlabs-client-1.23.0.iife.js"
-    ).read_bytes()
+def test_setup_pins_the_browser_sdk_download() -> None:
+    # The SDK bundle is downloaded by omarvis-setup rather than vendored, so
+    # the pin lives in the script: exact version, registry source, and the
+    # sha256 of dist/lib.iife.js from @elevenlabs/client 1.23.0.
+    script = (Path(__file__).parents[1] / "bin" / "omarvis-setup").read_text(encoding="utf-8")
 
-    assert hashlib.sha256(bundle).hexdigest() == (
-        "b6adb12bd5df649af3ce3ac9205fd0e7d1c099513481c58bd1990f2d50903204"
-    )
+    assert 'ELEVENLABS_CLIENT_VERSION="1.23.0"' in script
+    assert 'ELEVENLABS_CLIENT_URL="https://registry.npmjs.org/@elevenlabs/client/-/' in script
+    assert (
+        'ELEVENLABS_CLIENT_SHA256='
+        '"b6adb12bd5df649af3ce3ac9205fd0e7d1c099513481c58bd1990f2d50903204"'
+    ) in script
+    # The downloaded filename, the served route, and the page's script tag
+    # must all agree or the phone page loads nothing.
+    from omarvis.web import VENDOR_ROUTE
+
+    filename = VENDOR_ROUTE.rsplit("/", 1)[-1]
+    assert 'ELEVENLABS_CLIENT_FILE="elevenlabs-client-$ELEVENLABS_CLIENT_VERSION.iife.js"' in script
+    assert filename == "elevenlabs-client-1.23.0.iife.js"
+    page = (Path(__file__).parents[1] / "assets" / "web" / "index.html").read_text(encoding="utf-8")
+    assert f'src="./vendor/{filename}?k=OMARVIS_PAIRING_KEY"' in page
 
 
 def test_phone_infers_thinking_from_the_final_user_transcript() -> None:

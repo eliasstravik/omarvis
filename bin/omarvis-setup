@@ -15,6 +15,15 @@ PROFILE_PATH="$CONFIG_DIR/profile.md"
 STATE_DIR="$HOME/.local/share/omarvis"
 VENV_DIR="$STATE_DIR/venv"
 LOG_PATH="$STATE_DIR/setup.log"
+VENDOR_DIR="$STATE_DIR/vendor"
+# The phone page must never fetch third-party executable code at call time,
+# so setup downloads the ElevenLabs browser client (dist/lib.iife.js from the
+# published @elevenlabs/client npm package) once, verifies it against the
+# pinned digest, and omarvis-web serves the local copy.
+ELEVENLABS_CLIENT_VERSION="1.23.0"
+ELEVENLABS_CLIENT_FILE="elevenlabs-client-$ELEVENLABS_CLIENT_VERSION.iife.js"
+ELEVENLABS_CLIENT_URL="https://registry.npmjs.org/@elevenlabs/client/-/client-$ELEVENLABS_CLIENT_VERSION.tgz"
+ELEVENLABS_CLIENT_SHA256="b6adb12bd5df649af3ce3ac9205fd0e7d1c099513481c58bd1990f2d50903204"
 BINDINGS_PATH="$HOME/.config/hypr/bindings.lua"
 AGENT_BINDING='o.bind("SUPER + CTRL + J", "Omarvis", "omarchy-shell omarvis toggle")'
 DICTATE_UNBIND='hl.unbind("SUPER + J")'
@@ -327,6 +336,25 @@ if [[ $WILL_INSTALL_AGENT_BROWSER == true ]]; then
 fi
 if [[ $NEEDS_MANAGED_BROWSER == true && -n $AGENT_BROWSER_PATH ]]; then
   run_logged "agent-browser install (managed browser)" agent-browser install
+fi
+if [[ -f "$VENDOR_DIR/$ELEVENLABS_CLIENT_FILE" ]] \
+  && printf '%s  %s\n' "$ELEVENLABS_CLIENT_SHA256" "$VENDOR_DIR/$ELEVENLABS_CLIENT_FILE" \
+    | sha256sum -c - >>"$LOG_PATH" 2>&1; then
+  note "· browser SDK already present: $ELEVENLABS_CLIENT_FILE"
+else
+  sdk_tmp=$(mktemp -d)
+  run_logged "download @elevenlabs/client $ELEVENLABS_CLIENT_VERSION" \
+    curl -fsSL --max-time 120 -o "$sdk_tmp/client.tgz" "$ELEVENLABS_CLIENT_URL"
+  run_logged "extract dist/lib.iife.js" \
+    tar -xzf "$sdk_tmp/client.tgz" -C "$sdk_tmp" package/dist/lib.iife.js
+  if ! printf '%s  %s\n' "$ELEVENLABS_CLIENT_SHA256" "$sdk_tmp/package/dist/lib.iife.js" \
+      | sha256sum -c - >>"$LOG_PATH" 2>&1; then
+    rm -rf "$sdk_tmp"
+    die "@elevenlabs/client bundle failed its pinned sha256 check; nothing was installed"
+  fi
+  install -D -m 644 "$sdk_tmp/package/dist/lib.iife.js" "$VENDOR_DIR/$ELEVENLABS_CLIENT_FILE"
+  rm -rf "$sdk_tmp"
+  note "· verified browser SDK sha256, installed $ELEVENLABS_CLIENT_FILE"
 fi
 
 phase 2 "Creating the Python environment"

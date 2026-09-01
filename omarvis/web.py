@@ -37,13 +37,10 @@ DATA_DIR = Path.home() / ".local" / "share" / "omarvis"
 SECRET_PATH = DATA_DIR / "web-secret"
 THEME_DIR = Path.home() / ".local" / "state" / "omarchy" / "current" / "theme"
 WEB_ASSET = Path(__file__).resolve().parent.parent / "assets" / "web" / "index.html"
-VENDOR_ASSET = (
-    Path(__file__).resolve().parent.parent
-    / "assets"
-    / "web"
-    / "vendor"
-    / "elevenlabs-client-1.23.0.iife.js"
-)
+# Downloaded and checksum-verified by omarvis-setup so the repository does not
+# carry the bundle and the phone page still never fetches third-party
+# executable code at call time.
+VENDOR_ASSET = DATA_DIR / "vendor" / "elevenlabs-client-1.23.0.iife.js"
 VENDOR_ROUTE = "/vendor/elevenlabs-client-1.23.0.iife.js"
 FONT_DIR = Path(__file__).resolve().parent.parent / "assets" / "web" / "fonts"
 # The phone is not an Omarchy machine, so the Nerd Font the state glyphs are
