@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "Elias Stravik",
   "license": "MIT",
-  "description": "Voice control for Omarchy via ElevenLabs Agents",
+  "description": "Jarvis for Omarchy",
   "kinds": [
     "service",
     "bar-widget"
