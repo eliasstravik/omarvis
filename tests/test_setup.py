@@ -190,17 +190,35 @@ def test_setup_explains_remote_prerequisite_and_credential_risk():
     assert "copied URLs remain in clipboard history" in script
 
 
-def test_readme_discloses_full_remote_access_and_secret_lifetime():
+def test_reference_discloses_full_remote_access_and_secret_lifetime():
+    # The complete security model lives in the reference; the README carries
+    # only the headlines (asserted separately below).
+    reference = (
+        Path(__file__).parent.parent / "docs" / "reference.md"
+    ).read_text().lower()
+
+    assert "whoever holds this url, or photographs the qr" in reference
+    assert "can install software and run terminal commands" in reference
+    assert "never through funnel or the public internet" in reference
+    assert "processes running on any of them" in reference
+    assert "may sync to a cloud account and other devices" in reference
+    assert "persistent, browsable clipboard history" in reference
+    assert "delete that file while remote access is off" in reference
+    assert "persists across reboots and re-arms at login" in reference
+    assert "real-profile" in reference
+    assert "uploads a current desktop screenshot to elevenlabs" in reference
+    assert "phone and elevenlabs over webrtc" in reference
+
+
+def test_readme_headlines_remote_risk_and_data_flows():
     readme = (Path(__file__).parent.parent / "README.md").read_text().lower()
 
-    assert "whoever holds this url, or photographs the qr" in readme
-    assert "can install software and run terminal commands" in readme
-    assert "never through funnel or the public internet" in readme
-    assert "processes running on any of them" in readme
-    assert "may sync to a cloud account and other devices" in readme
-    assert "persistent, browsable clipboard history" in readme
-    assert "delete that file while remote access is off" in readme
-    assert "persists across reboots and re-arms at login" in readme
-    assert "real-profile" in readme
-    assert "uploads a current desktop screenshot to elevenlabs" in readme
-    assert "phone and elevenlabs over webrtc" in readme
+    # A reader who never opens the reference must still learn the remote URL
+    # is a credential, what the browser runs as, and what leaves the machine.
+    assert "anyone holding that url can drive your machine" in readme
+    assert "treat the qr like a credential" in readme
+    assert "tailscale serve only, never funnel" in readme
+    assert "snapshot copy of your real profile" in readme
+    assert "nothing is written back" in readme
+    assert "screenshot is uploaded only when you explicitly ask" in readme
+    assert "nothing is sent while idle" in readme
