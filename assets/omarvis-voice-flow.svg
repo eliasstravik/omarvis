@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="500" viewBox="0 0 960 500" role="img" aria-labelledby="title desc">
+  <title id="title">A spoken request travels through a policy check and comes back as finished desktop work</title>
+  <desc id="desc">You press a hotkey and speak; a realtime voice agent answers back, and only allowlisted commands reach your Omarchy desktop, Herdr agents, and browser.</desc>
+  <rect width="960" height="500" rx="20" fill="#f6f8fa"/>
+  <rect x="28" y="28" width="904" height="444" rx="14" fill="#ffffff" stroke="#d0d7de" stroke-width="2"/>
+  <circle cx="54" cy="54" r="6" fill="#ff7b72"/><circle cx="74" cy="54" r="6" fill="#f2cc60"/><circle cx="94" cy="54" r="6" fill="#56d364"/>
+  <rect x="124" y="43" width="420" height="22" rx="11" fill="#eef1f4"/>
+
+  <rect x="58" y="100" width="250" height="324" rx="12" fill="#ffffff" stroke="#d0d7de" stroke-width="2"/>
+  <rect x="78" y="124" width="210" height="34" rx="7" fill="#f6f8fa"/>
+  <circle cx="96" cy="141" r="5" fill="#4ac26b"/>
+  <text x="108" y="146" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#24292f">Super+Ctrl+J · on a call</text>
+
+  <rect x="112" y="172" width="176" height="46" rx="10" fill="#ddf4ff" stroke="#54aeff"/>
+  <text x="200" y="191" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" fill="#0a3069">"Open my PR and move</text>
+  <text x="200" y="208" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" fill="#0a3069">it to workspace 3."</text>
+
+  <rect x="78" y="228" width="176" height="46" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="166" y="247" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" fill="#24292f">"On screen now, in</text>
+  <text x="166" y="264" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" fill="#24292f">workspace 3."</text>
+
+  <rect x="112" y="284" width="176" height="30" rx="10" fill="#ddf4ff" stroke="#54aeff"/>
+  <text x="200" y="303" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" fill="#0a3069">"Volume down a bit."</text>
+
+  <circle cx="110" cy="348" r="16" fill="#ddf4ff" stroke="#54aeff" stroke-width="2"/>
+  <g transform="translate(110,348)" fill="none">
+    <rect x="-4" y="-9" width="8" height="12" rx="4" fill="#0969da"/>
+    <path d="M-7 -1a7 7 0 0 0 14 0M0 6v4" stroke="#0969da" stroke-width="1.8" stroke-linecap="round"/>
+  </g>
+  <g stroke="#54aeff" stroke-width="3" stroke-linecap="round">
+    <path d="M140 348v0"/><path d="M150 342v12"/><path d="M160 336v24"/><path d="M170 342v12"/><path d="M180 348v0"/>
+    <path d="M190 340v16"/><path d="M200 346v4"/><path d="M210 338v20"/><path d="M220 344v8"/><path d="M230 348v0"/>
+  </g>
+  <text x="183" y="397" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#24292f">1. Press the hotkey and talk</text>
+
+  <path d="M324 200h48" stroke="#8c959f" stroke-width="3" stroke-linecap="round"/><path d="m362 190 12 10-12 10" fill="none" stroke="#8c959f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="348" y="184" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#57606a">you speak</text>
+  <path d="M372 310h-48" stroke="#8c959f" stroke-width="3" stroke-linecap="round"/><path d="m334 300-12 10 12 10" fill="none" stroke="#8c959f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="348" y="340" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#57606a">it answers</text>
+
+  <rect x="388" y="100" width="210" height="324" rx="14" fill="#ffffff" stroke="#d0d7de" stroke-width="2"/>
+  <rect x="398" y="124" width="190" height="34" rx="7" fill="#f6f8fa"/>
+  <text x="493" y="146" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#24292f">ElevenLabs realtime agent</text>
+  <circle cx="493" cy="200" r="28" fill="#ddf4ff" stroke="#54aeff" stroke-width="2"/>
+  <g transform="translate(493,200)" fill="none" stroke="#0969da" stroke-width="2.4" stroke-linecap="round">
+    <path d="M-8 -4a8 8 0 0 1 16 0v4a8 8 0 0 1-16 0z" fill="#0969da" stroke="none"/>
+    <path d="M-12 2a12 12 0 0 0 24 0M0 14v4"/>
+  </g>
+  <g stroke="#54aeff" stroke-width="2.4" stroke-linecap="round" fill="none">
+    <path d="M451 192a14 14 0 0 1 0 16"/><path d="M443 186a22 22 0 0 1 0 28"/>
+    <path d="M535 208a14 14 0 0 0 0-16"/><path d="M543 214a22 22 0 0 0 0-28"/>
+  </g>
+  <text x="493" y="256" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" fill="#57606a">Hears you, talks back,</text>
+  <text x="493" y="276" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" fill="#57606a">acts through one guarded tool</text>
+  <rect x="410" y="300" width="166" height="52" rx="8" fill="#fff8c5" stroke="#d4a72c"/>
+  <text x="493" y="322" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="700" fill="#7d4e00">Allowlisted commands only</text>
+  <text x="493" y="341" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#7d4e00">risky ones wait for your spoken yes</text>
+  <text x="493" y="397" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#24292f">2. Policy checks every command</text>
+
+  <path d="M614 200h48" stroke="#8c959f" stroke-width="3" stroke-linecap="round"/><path d="m652 190 12 10-12 10" fill="none" stroke="#8c959f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="638" y="184" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#57606a">runs</text>
+  <path d="M662 310h-48" stroke="#8c959f" stroke-width="3" stroke-linecap="round"/><path d="m624 300-12 10 12 10" fill="none" stroke="#8c959f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="638" y="340" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#57606a">live state</text>
+
+  <rect x="678" y="100" width="224" height="324" rx="12" fill="#ffffff" stroke="#d0d7de" stroke-width="2"/>
+  <rect x="698" y="124" width="184" height="34" rx="7" fill="#f6f8fa"/>
+  <text x="790" y="146" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#24292f">Your Omarchy desktop</text>
+
+  <rect x="698" y="170" width="184" height="92" rx="8" fill="#ffffff" stroke="#d8dee4"/>
+  <text x="710" y="190" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#57606a">workspace 3</text>
+  <circle cx="716" cy="210" r="5" fill="#4ac26b"/>
+  <text x="730" y="215" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12.5" fill="#24292f">browser · PR open</text>
+  <circle cx="716" cy="238" r="5" fill="#0969da"/>
+  <text x="730" y="243" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12.5" fill="#24292f">volume · 30%</text>
+
+  <rect x="698" y="270" width="184" height="64" rx="8" fill="#ffffff" stroke="#d8dee4"/>
+  <text x="710" y="290" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#57606a">herdr · web workspace</text>
+  <circle cx="716" cy="312" r="5" fill="#4ac26b"/>
+  <text x="730" y="317" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12.5" fill="#24292f">api agent · prompted</text>
+
+  <rect x="698" y="342" width="184" height="28" rx="8" fill="#dafbe1" stroke="#4ac26b"/>
+  <text x="790" y="360" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#116329">omarchy · hyprland · browser</text>
+  <text x="790" y="397" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#24292f">3. The desktop does it</text>
+</svg>
