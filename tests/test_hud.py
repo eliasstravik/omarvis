@@ -84,44 +84,95 @@ def test_hands_free_is_signaled_by_the_attention_border():
     hud = HUD.read_text()
 
     # Border carries mode, like the lock screen's border-active: hands-free
-    # switches the strip border to bar.active. No lock glyph composition.
+    # gets a full accent frame, while ephemeral hold-to-talk reuses
+    # Omarchy's native unfocused-window border (read live from Hyprland's
+    # general:col.inactive_border by the service) so the two dictation
+    # modes never look alike. No lock glyph composition.
     assert "handsFree" in hud
     assert "dictationLocked" in hud
-    assert "Border.flat(Color.bar.active" in hud
+    assert "Border.flat(Color.accent" in hud
+    assert "hud.service.inactiveBorderColor" in hud
+    service = (Path(__file__).parents[1] / "Service.qml").read_text()
+    assert '"general:col.inactive_border"' in service
+    assert "applyInactiveBorderJson" in service
     assert "0xF033E" not in hud
 
 
-def test_tool_activity_lives_in_the_state_glyph_slot():
+def test_glyph_vocabulary_is_four_glyphs_and_never_churns_mid_call():
     hud = HUD.read_text()
 
-    # Running a command is a state: cog while executing, a ✓ flash when
-    # done, both in accent. No separate chip, so the strip stays one width.
-    assert "toolRunning" in hud
-    # mdi-wrench — a literal tool — is the generic running-command glyph.
-    assert "0xF05B7" in hud
-    assert "0xF0493" not in hud
-    assert '"✓"' in hud
-    # Iconic actions carry their own glyph: camera for captures, palette
-    # for theme changes, power for system actions.
-    assert "toolGlyphFor" in hud
-    assert "0xF0100" in hud
-    assert "0xF03D8" in hud
-    assert "0xF0425" in hud
-    glyph_expr = hud.split("stateGlyph:")[1].split("}")[0]
-    assert glyph_expr.index("toolSucceeded") < glyph_expr.index("toolRunning")
-    assert glyph_expr.index("0xF0026") < glyph_expr.index("toolSucceeded")
+    # Exactly four glyphs plus the failure alert: hourglass (waiting),
+    # microphone (your floor), speaker (agent's voice), wave (goodbye).
+    # Tool runs, ✓ flashes and a thinking glyph are deliberately gone —
+    # swapping pictures while you talk reads as glitchy.
+    for kept in ("0xF051F", "0xF036C", "0xF057E", "0xF0026"):
+        assert kept in hud
+    for retired in ("toolRunning", "toolSucceeded", "toolGlyphFor", '"✓"',
+                    "0xF05B7", "0xF0100", "0xF03D8", "0xF0425", "0xF06D7",
+                    "0xF01D8", "0xF0772"):
+        assert retired not in hud
+    # Thinking has no glyph of its own: mid-call it stays on the mic.
+    glyph_expr = hud.split("stateGlyph:")[1].split("\n  }")[0]
+    assert "thinking" not in glyph_expr
 
 
-def test_call_end_gets_a_goodbye_wave_beat():
+def test_call_end_disappears_with_no_goodbye_beat():
     hud = HUD.read_text()
 
-    # A finished call lingers ~900ms with a waving hand (mdi-hand-wave)
-    # instead of vanishing mid-sentence; errors don't wave.
-    assert "0xF1821" in hud
-    assert "waving" in hud
-    assert "waving || (service" in hud
-    assert 'hud.lastSessionState === "listening"' in hud
-    assert '"error"' not in hud.split("onSessionStateChanged")[1].split("}")[0]
+    # A finished call simply vanishes: no wave glyph, no lingering timer.
+    assert "0xF1821" not in hud
+    assert "waving" not in hud
+    assert "waveTimer" not in hud
+    assert "lastSessionState" not in hud
+
+
+def test_starting_gets_its_own_glyph_and_never_the_microphone():
+    hud = HUD.read_text()
+
+    # Up to 15s of websocket handshake used to show the same mic glyph at 45%
+    # opacity, which reads as "speak now". Waiting is its own state: the
+    # hourglass in the ordinary popups text color, and the mic glyph is
+    # reserved for the moment the session is actually live.
+    assert 'waitingToConnect: visualState === "starting"' in hud
+    assert "0xF051F" in hud
+    assert "opacity: hud.visualState === \"starting\" ? 0.45 : 1.0" not in hud
+    glyph_expr = hud.split("stateGlyph:")[1].split("\n  }")[0]
+    assert glyph_expr.index("0xF051F") < glyph_expr.index("0xF036C")
+
+
+def test_waiting_pulses_and_sweeps_instead_of_showing_a_dead_meter():
+    hud = HUD.read_text()
+
+    # The shell's 950ms InOutSine wait pulse on the glyph, and an
+    # indeterminate sweep in the meter — never a zero-length amplitude fill,
+    # which would read as a dead microphone.
+    pulse = hud.split("objectName: \"omarvisStateGlyph\"", 1)[1].split("Rectangle {", 1)[0]
+    assert "SequentialAnimation on opacity" in pulse
+    assert "running: hud.waitingToConnect && hud.visible" in pulse
+    assert "duration: 950" in pulse
+    assert "Easing.InOutSine" in pulse
+    assert "loops: Animation.Infinite" in pulse
+
+    assert 'objectName: "omarvisMeterSweep"' in hud
+    assert "visible: !hud.waitingToConnect" in hud
+    assert "visible: hud.waitingToConnect" in hud
+    sweep = hud.split('objectName: "omarvisMeterSweep"', 1)[1]
+    assert "color: Color.accent" in sweep
+    assert "SequentialAnimation on x" in sweep
+    assert "meter.width - meterSweep.width" in sweep
+
+
+def test_listening_returns_to_the_solid_microphone_and_the_live_meter():
+    hud = HUD.read_text()
+
+    # Pulse stops, the mic goes solid — attention color for the agent call's
+    # hot microphone, theme accent for dictation — and the amplitude fill
+    # takes the meter back.
+    assert 'visualState === "speaking" || visualState === "recording"' in hud
+    assert "Color.bar.active" in hud
+    assert 'objectName: "omarvisLevelFill"' in hud
+    fill = hud.split('objectName: "omarvisLevelFill"', 1)[1]
+    assert "width: parent.width * hud.meterLevel" in fill
 
 
 def test_hud_clears_bar_edge_like_notifications():

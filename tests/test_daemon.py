@@ -18,7 +18,15 @@ from omarvis.daemon import (
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def test_text_only_session_ends_after_its_agent_response(monkeypatch):
+def _silence_audio(monkeypatch):
+    """The voice call is the only session type, so every test drives a real
+    audio session with the microphone stubbed out."""
+    monkeypatch.setattr(
+        daemon, "_metered_audio_interface", lambda _index, _levels: None
+    )
+
+
+def test_session_relays_the_agent_response_and_ends_on_the_sdk_callback(monkeypatch):
     conversations = []
     events = []
 
@@ -27,15 +35,12 @@ def test_text_only_session_ends_after_its_agent_response(monkeypatch):
             self.options = options
             self._ws = object()
             self.ended = False
-            self.messages = []
             conversations.append(self)
 
         def start_session(self):
-            pass
-
-        def send_user_message(self, message):
-            self.messages.append(message)
+            self.options["callback_user_transcript"]("open a terminal")
             self.options["callback_agent_response"]("done")
+            self.options["callback_end_session"]()
 
         def end_session(self):
             self.ended = True
@@ -51,23 +56,20 @@ def test_text_only_session_ends_after_its_agent_response(monkeypatch):
     monkeypatch.setattr("omarvis.catalog.catalog_variables", lambda **_options: {})
     monkeypatch.setattr("omarvis.catalog.load_catalog", omarchy_catalog)
     monkeypatch.setattr(daemon, "emit_event", events.append)
+    _silence_audio(monkeypatch)
 
     result = daemon.run_session(
-        {
-            "agent_id": "agent",
-            "ask_agent_id": "ask",
-            "herdr_announcements": False,
-        },
+        {"agent_id": "agent", "herdr_announcements": False},
         "key",
-        text_only=True,
-        messages=["open a terminal"],
     )
 
     assert result == 0
-    assert conversations[0].messages == ["open a terminal"]
+    assert conversations[0].options["agent_id"] == "agent"
     assert conversations[0].ended is True
-    assert {"event": "state", "state": "thinking", "mode": "agent"} in events
+    assert {"event": "state", "state": "thinking"} in events
     assert {"event": "agent_part", "text": "done", "type": "final"} in events
+    # There is no mode any more, so no state event may carry one.
+    assert all("mode" not in event for event in events)
 
 
 def test_session_emits_thinking_streaming_parts_and_final_zero(monkeypatch):
@@ -82,13 +84,11 @@ def test_session_emits_thinking_streaming_parts_and_final_zero(monkeypatch):
             self._ws = object()
 
         def start_session(self):
-            pass
-
-        def send_user_message(self, message):
-            self.options["callback_user_transcript"](message)
+            self.options["callback_user_transcript"]("hi")
             self.options["callback_agent_chat_response_part"]("hello ", PartType())
             self.options["callback_agent_chat_response_part"]("there", PartType())
             self.options["callback_agent_response"]("hello there")
+            self.options["callback_end_session"]()
 
         def end_session(self):
             pass
@@ -104,16 +104,15 @@ def test_session_emits_thinking_streaming_parts_and_final_zero(monkeypatch):
     monkeypatch.setattr("omarvis.catalog.catalog_variables", lambda **_options: {})
     monkeypatch.setattr("omarvis.catalog.load_catalog", omarchy_catalog)
     monkeypatch.setattr(daemon, "emit_event", events.append)
+    _silence_audio(monkeypatch)
 
     assert daemon.run_session(
-        {"agent_id": "agent", "ask_agent_id": "ask", "herdr_announcements": False},
+        {"agent_id": "agent", "herdr_announcements": False},
         "key",
-        text_only=True,
-        messages=["hi"],
     ) == 0
 
-    thinking_index = events.index({"event": "state", "state": "thinking", "mode": "agent"})
-    speaking_index = events.index({"event": "state", "state": "speaking", "mode": "agent"})
+    thinking_index = events.index({"event": "state", "state": "thinking"})
+    speaking_index = events.index({"event": "state", "state": "speaking"})
     first_part_index = events.index({"event": "agent_part", "text": "hello ", "type": "delta"})
     assert thinking_index < speaking_index < first_part_index
     assert [event for event in events if event.get("event") == "agent_part"] == [
@@ -121,7 +120,7 @@ def test_session_emits_thinking_streaming_parts_and_final_zero(monkeypatch):
         {"event": "agent_part", "text": "there", "type": "delta"},
     ]
     assert {"event": "level", "in": 0.0, "out": 0.0} in events
-    assert events[-1] == {"event": "state", "state": "idle", "mode": "agent"}
+    assert events[-1] == {"event": "state", "state": "idle"}
 
 
 @pytest.mark.parametrize(
@@ -885,38 +884,23 @@ def test_client_tool_result_is_serialized_for_the_elevenlabs_protocol():
     }
 
 
-def test_run_tool_handler_passes_ask_scope_to_policy():
-    calls = []
-
-    def executor(argv, *, timeout, kill_on_timeout, stdout_limit):
-        calls.append(tuple(argv))
-        return ExecutionResult(0, "", "")
-
-    handler = RunToolHandler(
-        catalog=omarchy_catalog(),
-        dispatchers={"killactive"},
-        config={},
-        executor=executor,
-        confirmation_wait=0,
-        scope="ask",
-    )
-
-    result = handler.handle({"command": "hyprctl dispatch killactive"})
-
-    assert result["status"] == "rejected"
-    assert "ask mode" in result["reason"]
-    assert calls == []
+def test_run_tool_handler_has_no_scope_switch():
+    # Ask mode is gone: there is exactly one policy scope, and the handler
+    # must not accept a keyword that could reintroduce a second one.
+    with pytest.raises(TypeError):
+        RunToolHandler(
+            catalog=omarchy_catalog(),
+            dispatchers={"killactive"},
+            config={},
+            scope="ask",
+        )
 
 
-def test_main_defaults_to_agent_mode_and_accepts_ask_mode(monkeypatch):
+def test_main_starts_one_kind_of_session_with_no_mode_arguments(monkeypatch):
     from omarvis import daemon
 
     calls = []
-    monkeypatch.setattr(
-        daemon,
-        "load_config",
-        lambda: {"agent_id": "agent-id", "ask_agent_id": "ask-id"},
-    )
+    monkeypatch.setattr(daemon, "load_config", lambda: {"agent_id": "agent-id"})
     monkeypatch.setattr(daemon, "load_api_key", lambda: "key")
 
     def fake_run_session(config, api_key, **options):
@@ -926,10 +910,10 @@ def test_main_defaults_to_agent_mode_and_accepts_ask_mode(monkeypatch):
     monkeypatch.setattr(daemon, "run_session", fake_run_session)
 
     assert daemon.main([]) == 0
-    assert daemon.main(["--mode", "agent"]) == 0
-    assert daemon.main(["--mode", "ask"]) == 0
-    assert [call[2]["mode"] for call in calls] == ["agent", "agent", "ask"]
-    assert calls[0] == calls[1]
+    assert calls == [({"agent_id": "agent-id"}, "key", {})]
+    for retired in (["--mode", "ask"], ["--text-only"], ["--message", "hi"]):
+        with pytest.raises(SystemExit):
+            daemon.main(retired)
 
 
 def test_load_config_deep_merges_dictation_defaults(tmp_path):
@@ -944,7 +928,6 @@ def test_load_config_deep_merges_dictation_defaults(tmp_path):
         "language": "sv",
         "cleanup": True,
         "model_id": "scribe_v2",
-        "chunk_size": 500,
     }
 
 
@@ -952,13 +935,12 @@ def test_load_config_deep_merges_ui_defaults(tmp_path):
     from omarvis.daemon import load_config
 
     path = tmp_path / "config.json"
-    path.write_text('{"ui":{"earcons":false}}')
+    path.write_text('{"ui":{"hud_position":"top-right"}}')
 
     config = load_config(path)
 
     assert config["ui"] == {
-        "earcons": False,
-        "hud_position": "top-center",
+        "hud_position": "top-right",
     }
 
 
@@ -973,8 +955,7 @@ def test_load_config_discards_removed_anthropic_vision_block(tmp_path):
     assert "vision" not in config
 
 
-@pytest.mark.parametrize("scope", ["agent", "ask"])
-def test_omarvis_see_queues_an_elevenlabs_file_for_the_tool_call(scope):
+def test_omarvis_see_queues_an_elevenlabs_file_for_the_tool_call():
     def executor(*_args, **_kwargs):
         raise AssertionError("omarvis see must never be subprocessed")
 
@@ -983,7 +964,6 @@ def test_omarvis_see_queues_an_elevenlabs_file_for_the_tool_call(scope):
         dispatchers=set(),
         config={},
         executor=executor,
-        scope=scope,
         screenshot_sender=lambda: "file-current-desktop",
     )
 
@@ -1264,6 +1244,7 @@ def test_session_watchdog_ends_loop_when_sdk_stops_without_callback(monkeypatch)
     monkeypatch.setattr("omarvis.catalog.catalog_variables", lambda **_options: {})
     monkeypatch.setattr("omarvis.catalog.load_catalog", omarchy_catalog)
     monkeypatch.setattr(daemon, "emit_event", events.append)
+    _silence_audio(monkeypatch)
     # Signal handlers can only be installed on the main thread; the test
     # runs the session on a worker so a regression can't hang pytest.
     monkeypatch.setattr(daemon.signal, "signal", lambda *_args: None)
@@ -1273,14 +1254,8 @@ def test_session_watchdog_ends_loop_when_sdk_stops_without_callback(monkeypatch)
         target=lambda: result.setdefault(
             "code",
             daemon.run_session(
-                {
-                    "agent_id": "agent",
-                    "ask_agent_id": "ask",
-                    "herdr_announcements": False,
-                },
+                {"agent_id": "agent", "herdr_announcements": False},
                 "key",
-                text_only=True,
-                messages=[],
             ),
         ),
         daemon=True,
@@ -1289,3 +1264,24 @@ def test_session_watchdog_ends_loop_when_sdk_stops_without_callback(monkeypatch)
     worker.join(5.0)
 
     assert result.get("code") == 0
+
+
+def test_process_exit_skips_interpreter_finalization():
+    import inspect
+
+    import omarvis.daemon as mod
+    import omarvis.dictate as dictate
+
+    daemon_src = inspect.getsource(mod)
+    dictate_src = open(dictate.__file__).read()
+
+    # PortAudio's callback thread and the SDK's websocket thread are daemon
+    # threads; letting CPython finalize under them is the recurring
+    # "Process crashed: python 3.14" SIGSEGV. Both entry points must join
+    # the audio teardown and then exit via os._exit.
+    assert "def join_teardown(self, timeout: float)" in daemon_src
+    assert 'getattr(audio_interface, "join_teardown", None)' in daemon_src
+    assert "os._exit(code)" in daemon_src
+    assert "os._exit(code)" in dictate_src
+    assert 'raise SystemExit(main())' not in daemon_src
+    assert 'raise SystemExit(main())' not in dictate_src

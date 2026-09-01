@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 from array import array
@@ -12,7 +13,6 @@ from omarvis.dictate import (
     copy_to_clipboard,
     inject_text,
     scribe_transcriber,
-    text_chunks,
 )
 
 
@@ -31,30 +31,69 @@ def test_transcript_cleanup_always_strips_trailing_newlines(
     assert clean_transcript(raw, cleanup=cleanup) == expected
 
 
-def test_long_transcripts_are_chunked_without_changing_text():
-    text = "abcdefghijklmnopqrstuvwxyz"
-
-    chunks = text_chunks(text, chunk_size=7)
-
-    assert chunks == ["abcdefg", "hijklmn", "opqrstu", "vwxyz"]
-    assert "".join(chunks) == text
-
-
-def test_wtype_injection_is_direct_chunked_and_has_no_newline():
-    calls = []
+def _paste_runner(calls, window_class):
+    class Result:
+        stdout = json.dumps({"class": window_class}).encode()
 
     def runner(argv, **options):
         calls.append((argv, options))
+        return Result()
 
-    inject_text("abcdefghij", chunk_size=4, runner=runner)
+    return runner
 
+
+def test_injection_is_a_single_ctrl_v_paste_not_typing():
+    calls = []
+
+    inject_text(
+        "any transcript at all",
+        runner=_paste_runner(calls, "chromium"),
+        sleeper=lambda _s: None,
+    )
+
+    # One hyprctl probe, one paste chord: the text appears at once from the
+    # clipboard (already set by copy_to_clipboard), never typed out.
     assert [call[0] for call in calls] == [
-        ["wtype", "--", "abcd"],
-        ["wtype", "--", "efgh"],
-        ["wtype", "--", "ij"],
+        ["hyprctl", "activewindow", "-j"],
+        ["wtype", "-M", "ctrl", "-P", "v", "-p", "v", "-m", "ctrl"],
     ]
-    assert all("\n" not in call[0][-1] for call in calls)
     assert all(call[1]["check"] is True for call in calls)
+
+
+def test_injection_uses_ctrl_shift_v_in_terminals():
+    calls = []
+
+    inject_text(
+        "ls -la",
+        runner=_paste_runner(calls, "Alacritty"),
+        sleeper=lambda _s: None,
+    )
+
+    assert calls[-1][0] == [
+        "wtype", "-M", "ctrl", "-M", "shift", "-P", "v", "-p", "v",
+        "-m", "shift", "-m", "ctrl",
+    ]
+
+
+def test_injection_falls_back_to_plain_paste_when_hyprctl_fails():
+    calls = []
+
+    def runner(argv, **options):
+        calls.append(argv)
+        if argv[0] == "hyprctl":
+            raise RuntimeError("no compositor")
+
+    inject_text("words", runner=runner, sleeper=lambda _s: None)
+
+    assert calls[-1] == ["wtype", "-M", "ctrl", "-P", "v", "-p", "v", "-m", "ctrl"]
+
+
+def test_injection_of_empty_text_does_nothing():
+    calls = []
+
+    inject_text("", runner=_paste_runner(calls, "chromium"), sleeper=lambda _s: None)
+
+    assert calls == []
 
 
 def test_clipboard_copy_uses_safe_argv_and_detaches_all_streams():
@@ -101,7 +140,6 @@ def test_clipboard_failure_never_prevents_injection(monkeypatch):
 
 def test_injector_failure_keeps_transcript_and_emits_one_idle(monkeypatch):
     events = []
-    sounds = []
     clipboard = []
     monkeypatch.setattr(
         "omarvis.dictate.subprocess.run",
@@ -112,8 +150,6 @@ def test_injector_failure_keeps_transcript_and_emits_one_idle(monkeypatch):
         transcriber=lambda _audio: "recoverable words",
         injector=lambda _text: (_ for _ in ()).throw(RuntimeError("wtype failed")),
         event_sink=events.append,
-        earcons_enabled=True,
-        sound_player=lambda name, *, enabled: sounds.append((name, enabled)),
         tap_discard_seconds=0.0,
     )
 
@@ -129,11 +165,6 @@ def test_injector_failure_keeps_transcript_and_emits_one_idle(monkeypatch):
         "text": "recoverable words",
     } in events
     assert sum(event.get("state") == "idle" for event in events) == 1
-    assert sounds == [
-        ("mic-open", True),
-        ("mic-close", True),
-        ("error", True),
-    ]
     assert service.state == "idle"
 
 
@@ -264,46 +295,14 @@ def test_audio_recorder_emits_throttled_recording_levels(monkeypatch):
     assert recording_levels == [pytest.approx(0.488, abs=0.001), 0.0]
 
 
-def test_dictation_plays_open_and_close_earcons_when_enabled():
-    sounds = []
+def test_dictation_is_silent_by_design():
+    # Earcons were removed outright: the service has no sound hooks at all,
+    # so nothing can beep no matter what the config says.
+    import omarvis.dictate as dictate
 
-    class Recorder:
-        def start(self):
-            pass
-
-        def stop(self):
-            return b"pcm"
-
-    service = DictationService(
-        recorder=Recorder(),
-        transcriber=lambda _audio: "captured",
-        injector=lambda _text: None,
-        earcons_enabled=True,
-        sound_player=lambda name, *, enabled: sounds.append((name, enabled)),
-        tap_discard_seconds=0.0,
-    )
-
-    assert service.start() == "recording"
-    assert service.stop() == "transcribing"
-    service.wait()
-
-    assert sounds == [("mic-open", True), ("mic-close", True)]
-
-
-def test_dictation_plays_error_earcon_on_capture_failure():
-    sounds = []
-    service = DictationService(
-        recorder=SimpleNamespace(
-            start=lambda: (_ for _ in ()).throw(RuntimeError("mic failed"))
-        ),
-        transcriber=lambda _audio: "",
-        injector=lambda _text: None,
-        earcons_enabled=True,
-        sound_player=lambda name, *, enabled: sounds.append((name, enabled)),
-    )
-
-    assert service.start() == "error"
-    assert sounds == [("error", True)]
+    source = open(dictate.__file__).read()
+    for retired in ("sound_player", "earcons_enabled", "_play", "play_sound"):
+        assert retired not in source
 
 
 class _PcmRecorder:

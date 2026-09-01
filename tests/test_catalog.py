@@ -17,6 +17,7 @@ from omarvis.catalog import (
     hyprland_prompt,
     load_catalog,
     load_herdr_catalog,
+    load_herdr_skill,
     profile_memory,
     translate_dispatch,
 )
@@ -394,3 +395,36 @@ def test_herdr_catalog_is_empty_when_the_server_is_not_running(tmp_path):
 
     assert catalog.routes == frozenset()
     assert catalog.prompt_text == ""
+
+
+def test_herdr_skill_is_adapted_cached_and_version_keyed(tmp_path):
+    calls = []
+    raw = (
+        "---\nname: herdr\ndescription: \"embedded agent skill\"\n---\n\n"
+        "# Herdr\n\nBefore issuing any control command, verify HERDR_ENV.\n"
+    )
+
+    def runner(argv, timeout):
+        calls.append(tuple(argv))
+        if argv[1] == "--version":
+            return CommandOutput(0, "herdr 9.9.9", "")
+        return CommandOutput(0, raw, "")
+
+    skill = load_herdr_skill(runner=runner, cache_dir=tmp_path)
+
+    # Frontmatter is stripped and the Omarvis preface overrides the
+    # embedded-agent rules (HERDR_ENV gate, no-outside-control).
+    assert skill.startswith("How you use Herdr:")
+    assert "name: herdr" not in skill
+    assert "# Herdr" in skill
+    # Cached by version: a second load never re-runs --skill.
+    again = load_herdr_skill(runner=runner, cache_dir=tmp_path)
+    assert again == skill
+    assert calls.count(("herdr", "--skill")) == 1
+
+
+def test_herdr_skill_is_empty_without_herdr(tmp_path):
+    def runner(argv, timeout):
+        raise OSError("no herdr")
+
+    assert load_herdr_skill(runner=runner, cache_dir=tmp_path) == ""

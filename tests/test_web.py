@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import hashlib
 import json
+import re
 import stat
 import threading
 from http.server import ThreadingHTTPServer
@@ -12,6 +13,8 @@ import pytest
 
 from omarvis.web import (
     BIND_FAILURE_EXIT,
+    FONT_DIR,
+    FONT_FILES,
     CommandResult,
     RemoteApplication,
     TailnetController,
@@ -197,7 +200,6 @@ def test_token_mint_registers_fresh_bound_session_without_start_grace(monkeypatc
         assert second["local_ended"] is True
         assert app.session().conversation_id == "simulate-conversation"
         assert app.session().handler is not first_handler
-        assert app.session().handler.scope == "agent"
         assert first_handler._approved_categories == set()
         assert [event for event in events if event.get("event") == "phone"][-2:] == [
             {"event": "phone", "active": False, "reason": "takeover"},
@@ -319,7 +321,7 @@ def test_http_security_and_session_contract(monkeypatch, tmp_path: Path) -> None
     try:
         for path in (
             "/?k=wrong",
-            "/background?k=wrong",
+            "/fonts/jetbrains-mono-nf-regular.woff2?k=wrong",
             "/api/events?k=wrong",
             "/vendor/elevenlabs-client-1.23.0.iife.js?k=wrong",
         ):
@@ -366,6 +368,32 @@ def test_http_security_and_session_contract(monkeypatch, tmp_path: Path) -> None
         )[0] == 304
         assert request("GET", "/vendor/elevenlabs-client-1.23.0.iife.js?k=wrong")[0] == 403
 
+        # The phone is not an Omarchy machine, so the Nerd Font the state
+        # glyphs live in has to be served alongside the page.
+        status, headers, body = request(
+            "GET",
+            "/omarvis/fonts/jetbrains-mono-nf-regular.woff2?k=pairing-secret",
+            headers=identity_headers,
+        )
+        assert status == 200
+        assert headers["Content-Type"] == "font/woff2"
+        assert headers["Cache-Control"] == "private, max-age=31536000, immutable"
+        assert headers["X-Content-Type-Options"] == "nosniff"
+        assert body[:4] == b"wOF2"
+        assert request(
+            "GET",
+            "/fonts/jetbrains-mono-nf-regular.woff2?k=pairing-secret",
+            headers={**identity_headers, "If-None-Match": headers["ETag"]},
+        )[0] == 304
+        # Only the two shipped faces are reachable; the route is not a
+        # directory server.
+        assert request(
+            "GET", "/fonts/../web-secret?k=pairing-secret", headers=identity_headers
+        )[0] == 404
+        assert request(
+            "GET", "/background?k=pairing-secret", headers=identity_headers
+        )[0] == 404
+
         assert request(
             "POST", "/api/ping", body="{}", headers={**post_headers, "Origin": "https://evil.test"}
         )[0] == 403
@@ -395,31 +423,70 @@ def test_http_security_and_session_contract(monkeypatch, tmp_path: Path) -> None
         thread.join(timeout=2)
 
 
-def test_theme_and_background_are_inlined_with_conditional_metadata(tmp_path: Path) -> None:
+def test_theme_tokens_cover_every_surface_the_phone_page_paints(tmp_path: Path) -> None:
     theme = tmp_path / "theme"
     theme.mkdir()
     (theme / "shell.toml").write_text(
-        '[popups]\nbackground = "#101010"\ntext = "#eeeeee"\nborder = "#333333"\n',
+        "[bar]\nactive = \"#ff0055\"\n"
+        "[popups]\nbackground = \"#101010\"\ntext = \"#eeeeee\"\n"
+        "border = \"hyprland.active-border\"\n"
+        "[hyprland]\nactive-border = \"#123456\"\n"
+        "[polkit]\ntext-error = \"#ff2200\"\n",
         encoding="utf-8",
     )
-    (theme / "colors.toml").write_text("accent = '#00ffaa'\n", encoding="utf-8")
-    background = theme / "wall.png"
-    background.write_bytes(b"png")
-    (tmp_path / "background").symlink_to(Path("theme") / background.name)
+    (theme / "colors.toml").write_text(
+        "accent = '#00ffaa'\nbackground = '#050505'\nforeground = '#cccccc'\n",
+        encoding="utf-8",
+    )
     index = tmp_path / "index.html"
     index.write_text("<style>/* OMARVIS_THEME */</style>", encoding="utf-8")
 
-    assets = ThemeAssets(theme, index)
-    html = assets.html()
-    result = assets.background()
+    html = ThemeAssets(theme, index).html().decode()
 
-    assert b"--omarvis-background:#101010" in html
-    assert b"--omarvis-foreground:#eeeeee" in html
-    assert result is not None
-    assert result[0] == background
-    assert result[1].startswith('"')
-    assert result[2].endswith("GMT")
-    assert result[3] == "image/png"
+    # The page ground is the theme background; the card is the popups
+    # surface; accent is the theme accent and bar.active stays the separate
+    # hot-microphone color, exactly as the QML surfaces split them.
+    assert "--omarvis-background:#050505" in html
+    assert "--omarvis-surface:#101010" in html
+    assert "--omarvis-foreground:#cccccc" in html
+    assert "--omarvis-text:#eeeeee" in html
+    assert "--omarvis-accent:#00ffaa" in html
+    assert "--omarvis-active:#ff0055" in html
+    assert "--omarvis-urgent:#ff2200" in html
+    # Indirections through shell sections still resolve.
+    assert "--omarvis-border:#123456" in html
+
+
+def test_theme_tokens_fall_back_without_a_theme(tmp_path: Path) -> None:
+    index = tmp_path / "index.html"
+    index.write_text("<style>/* OMARVIS_THEME */</style>", encoding="utf-8")
+
+    html = ThemeAssets(tmp_path / "missing", index).html().decode()
+
+    for token in (
+        "background",
+        "surface",
+        "foreground",
+        "text",
+        "accent",
+        "active",
+        "urgent",
+        "border",
+    ):
+        assert f"--omarvis-{token}:#" in html
+
+
+def test_every_theme_token_the_page_uses_is_substituted() -> None:
+    page = (Path(__file__).parents[1] / "assets" / "web" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    html = ThemeAssets().html().decode()
+
+    used = set(re.findall(r"var\(--omarvis-([a-z]+)\)", page))
+    defined = set(re.findall(r"--omarvis-([a-z]+):", html))
+
+    assert used
+    assert used <= defined
 
 
 def test_phone_page_contains_pinned_session_and_relay_contract() -> None:
@@ -427,19 +494,104 @@ def test_phone_page_contains_pinned_session_and_relay_contract() -> None:
         encoding="utf-8"
     )
 
-    assert "elevenlabs-client-1.23.0.iife.js?k=OMARVIS_BACKGROUND_KEY" in page
+    assert "elevenlabs-client-1.23.0.iife.js?k=OMARVIS_PAIRING_KEY" in page
     assert 'await post("./api/token")' in page
     assert "await openEvents()" in page
-    assert "Conversation.startSession" in page
+    assert page.index("await openEvents()") < page.index("Conversation.startSession")
     assert "dynamicVariables: token.dynamic_variables || {}" in page
     assert "clientTools: {run: relayRun}" in page
     assert "started.getId() !== expectedConversationId" in page
     assert 'role === "user"' in page
-    assert '{text: message, final: true}' in page
+    assert "{text: message, final: true}" in page
     assert 'post("./api/ping")' in page
+    assert "}, 5000);" in page
     assert "sendContextualUpdate" in page
     assert "sendMultimodalMessage" in page
     assert page.index("return JSON.stringify(result)") < page.index("setTimeout(flushSeeReady, 0)")
+    assert "env(safe-area-inset-bottom)" in page
+    assert "@media (prefers-reduced-motion: reduce)" in page
+    assert "@media (max-width: 360px)" in page
+
+
+def test_phone_page_is_a_touchable_osd_not_a_glassy_card() -> None:
+    page = (Path(__file__).parents[1] / "assets" / "web" / "index.html").read_text(
+        encoding="utf-8"
+    )
+
+    # Omarchy surfaces are opaque, square and hairline-bordered. Nothing on
+    # this page may be rounded, blurred, shadowed, or laid over the wallpaper.
+    assert "backdrop-filter" not in page
+    assert "box-shadow" not in page
+    assert "./background" not in page
+    assert "OMARVIS_BACKGROUND_KEY" not in page
+    for radius in re.findall(r"border-radius:\s*([^;]+);", page):
+        assert radius.strip() in {"0"}, radius
+    assert not re.search(r"\btransform:\s*scale", page)
+
+    # One card, one state glyph, one flat 6px meter, one full-width action.
+    assert "border: 2px solid var(--omarvis-accent)" in page
+    assert "background: var(--omarvis-surface)" in page
+    assert "background: var(--omarvis-background)" in page
+    assert "height: 6px" in page
+    assert "color-mix(in srgb, var(--omarvis-text) 45%, transparent)" in page
+    assert "transition: width 140ms cubic-bezier(0.33, 1, 0.68, 1)" in page
+    assert "min-height: 72px" in page
+    assert "color: var(--omarvis-background)" in page
+    assert "background: var(--omarvis-accent)" in page
+    # Secondary states use the [controls] foreground-tint alphas.
+    assert "color-mix(in srgb, var(--omarvis-text) 8%, transparent)" in page
+    assert "color-mix(in srgb, var(--omarvis-text) 4%, transparent)" in page
+
+    # The 2x2 MIC/AGENT grid, the tailnet pill and the brand heading are gone.
+    assert "tailnet only" not in page
+    assert "<h1" not in page
+    assert 'class="dot"' not in page
+    assert ">MIC<" not in page
+    assert ">AGENT<" not in page
+
+
+def test_phone_page_ships_its_own_nerd_font_and_shares_the_hud_vocabulary() -> None:
+    page = (Path(__file__).parents[1] / "assets" / "web" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    hud = (Path(__file__).parents[1] / "HudWindow.qml").read_text(encoding="utf-8")
+
+    assert page.count("@font-face") == 2
+    assert 'font-family: "JetBrainsMono NF", monospace' in page
+    assert "./fonts/jetbrains-mono-nf-regular.woff2?k=OMARVIS_PAIRING_KEY" in page
+    assert "./fonts/jetbrains-mono-nf-bold.woff2?k=OMARVIS_PAIRING_KEY" in page
+    assert "font-display: swap" in page
+    for name in FONT_FILES:
+        font = FONT_DIR / name
+        assert font.exists()
+        assert font.read_bytes()[:4] == b"wOF2"
+
+    # Same four-glyph vocabulary as the desktop HUD: hourglass (waiting),
+    # microphone (your floor), speaker (agent's voice), wave (goodbye), plus
+    # the failure alert. Nothing else — no tool glyphs, no ✓, no thinking.
+    for codepoint in ("0xF036C", "0xF051F", "0xF057E", "0xF0026"):
+        assert codepoint in page
+        assert codepoint in hud
+    for retired in ("toolGlyphFor", '"✓"', "0xF0100", "0xF03D8", "0xF0425",
+                    "0xF05B7", "0xF01D8", "0xF0772"):
+        assert retired not in page
+    assert page.index("waiting: String.fromCodePoint(0xF051F)") > 0
+    # The header names the product, not the hostname.
+    assert '.textContent = "Omarvis"' in page
+    assert "animation: omarvis-pulse 1900ms ease-in-out infinite" in page
+    assert "@keyframes omarvis-pulse" in page
+    assert 'elements.talkLabel.textContent = sweeping ? "Connecting"' in page
+
+    # No visible prose on the page: status is screen-reader-only, and the
+    # explainer sentence is gone for good.
+    assert "Starting here ends" not in page
+    assert "<footer>" not in page
+    assert 'class="sr" id="status"' in page
+    # The microphone is requested once and kept muted between calls so the
+    # permission prompt cannot repeat within a page load.
+    assert "getUserMedia" in page
+    assert "function ensureMic" in page
+    assert "pagehide" in page
 
 
 def test_vendored_browser_sdk_matches_recorded_integrity() -> None:
@@ -454,3 +606,16 @@ def test_vendored_browser_sdk_matches_recorded_integrity() -> None:
     assert hashlib.sha256(bundle).hexdigest() == (
         "b6adb12bd5df649af3ce3ac9205fd0e7d1c099513481c58bd1990f2d50903204"
     )
+
+
+def test_phone_infers_thinking_from_the_final_user_transcript() -> None:
+    page = (
+        Path(__file__).parents[1] / "assets" / "web" / "index.html"
+    ).read_text(encoding="utf-8")
+
+    # The SDK emits no thinking event; the final user transcript is the
+    # thinking signal, cleared on any mode change and by a failsafe timer.
+    assert "if (!agentSpeaking) setPondering(true);" in page
+    assert "setPondering(false);" in page
+    assert "(runInFlight || pondering) && live" in page
+    assert "}, 12000);" in page

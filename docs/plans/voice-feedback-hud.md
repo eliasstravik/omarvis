@@ -1,6 +1,13 @@
 # Implementation plan: Voice session feedback HUD
 
-Status: approved for implementation. Written 2026-08-31.
+Status: implemented, then partly superseded. Written 2026-08-31.
+
+Superseded where it disagrees with the shipped HUD. The strip ended up
+text-free, so the "text line" and "tool chip" sections below describe a design
+that was not kept: conversation text lives in the bar tooltip and errors go to
+the notification server. Ask mode, its `SUPER+SHIFT+J` binding, and the
+`--text-only` / `--message` one-shot are gone entirely — the two-way call is
+the only session type — so every reference to them below is historical.
 
 ## 1. Problem and background
 

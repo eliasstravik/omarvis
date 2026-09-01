@@ -30,19 +30,17 @@ Setup prints the J-key family and can append any missing bindings after making a
 
 ```lua
 o.bind("SUPER + CTRL + J", "Omarvis", "omarchy-shell omarvis toggle")
-o.bind("SUPER + SHIFT + J", "Omarvis Ask", "omarchy-shell omarvis toggleMode ask")
 hl.unbind("SUPER + J") -- replaces Omarchy's Toggle window split binding where present
 o.bind("SUPER + J", "Omarvis Dictate", "omarchy-shell omarvis dictate start")
 o.bind("SUPER + J", "Omarvis Dictate Stop", "omarchy-shell omarvis dictate stop", { release = true })
-o.bind("SUPER + ALT + J", "Omarvis Text", "<plugin-dir>/bin/omarvis-text")
 o.bind("SUPER + CTRL + ALT + J", "Omarvis Panel", "omarchy-shell omarvis panel")
 ```
 
-`SUPER + CTRL + J` starts the full Agent scope. `SUPER + SHIFT + J` starts the strictly read-only Ask scope. Hold `SUPER + J` to dictate your own words into the focused window, or use `SUPER + ALT + J` for a typed one-shot Agent instruction. Left-click the bar microphone, or press `SUPER + CTRL + ALT + J`, to open the Omarvis panel. Right-click is intentionally inert.
+`SUPER + CTRL + J` starts or ends the two-way voice call — the only kind of session Omarvis has. Hold `SUPER + J` to dictate your own words into the focused window. Left-click the bar microphone, or press `SUPER + CTRL + ALT + J`, to open the Omarvis panel. Right-click is intentionally inert. Setup deletes any `SUPER + SHIFT + J` Ask binding or `SUPER + ALT + J` text binding an older install left behind.
 
 ## Panel
 
-The native Omarchy panel shows live mode and status, Agent/Ask start controls, and the latest voice exchange. Its short hover tooltip retains mode and state while the full detail lives in the panel. Dictation history deliberately does not appear in Omarvis: every successful transcript goes to the Wayland clipboard, and Omarchy's clipboard manager is the sole history UI. The REMOTE section controls the tailnet-only web service and shows its URL and QR code when serving.
+The native Omarchy panel is deliberately small: a hero with the state glyph and a one-word status, one Start/End button, and the REMOTE section. There is no mode choice, no transcript, and no scrolling. Conversation text lives in the bar tooltip, dictation history lives in Omarchy's clipboard manager, and anything that needs real reading — a failed voice session, a remote service that cannot serve — goes to the notification server. The REMOTE section shows the pairing QR while remote access is on and no phone is connected; when a phone joins, the QR is replaced by a PHONE CONNECTED row and an end-session button. The copy glyph beside the QR puts the pairing URL on the clipboard for the cases a camera cannot reach.
 
 The panel uses the existing `omarvis.voice` module id and the existing `entryPoints.barWidget` manifest key, so upgrading from the former click-to-toggle widget requires no `shell.json` migration. Opening another stock panel closes Omarvis through Omarchy's normal one-popup coordinator.
 
@@ -64,20 +62,19 @@ Phone conversation audio flows directly between the phone and ElevenLabs over We
 
 ## Session HUD
 
-While a voice session or dictation is active, Omarvis shows a passive pill at the top of the screen. The left dot follows microphone level, the right dot animates while the agent thinks and follows playback level while it speaks, and validated tool execution gets a separate spinner/check indicator. The HUD disappears when both session and dictation are idle; errors remain visible until the next state change. Short earcons mark microphone open, microphone close, and failures.
+While a voice session or dictation is active, Omarvis shows a text-free strip under the bar: one state glyph and one amplitude meter. The vocabulary is three glyphs — an hourglass for any waiting or busywork (connecting, transcribing, thinking, running a command), a microphone when the floor is yours, and a speaker while the agent talks — plus an alert mark for failures, which are otherwise routed to desktop notifications. A finished call simply disappears. The strip disappears when both session and dictation are idle. Omarvis plays no sounds.
 
 The defaults can be overridden in `~/.config/omarchy/omarvis/config.json`:
 
 ```json
 {
   "ui": {
-    "earcons": true,
     "hud_position": "top-center"
   }
 }
 ```
 
-`hud_position` accepts `top-center` or `top-right`. Set `earcons` to `false` to silence all three cues. For development, `bin/omarvis-run --simulate` emits the complete HUD event timeline without an API key, audio hardware, network access, or ElevenLabs usage.
+`hud_position` accepts `top-center` or `top-right`. For development, `bin/omarvis-run --simulate` emits the complete HUD event timeline without an API key, audio hardware, network access, or ElevenLabs usage.
 
 ## What it can do
 
@@ -87,7 +84,7 @@ Herdr support includes reading agent and workspace state, focusing agents and pa
 
 Browser support includes navigation, tab management, snapshots, clicking, filling fields, keyboard input, page titles, screenshots, downloads, and uploads. In `own-browser` mode Omarvis opens its own tab for the first navigation. Its isolated browser modes suppress Chromium's automatic startup tab, open one controlled tab, and create another only when you explicitly ask. It only changes to one of your other tabs when you ask it to switch.
 
-Ask mode is enforced in Python policy: dispatchers, navigation, clicks, launches, and every other mutation are refused even if the model requests one. `omarvis see` is intercepted in-process, captures the current desktop, uploads it into the active ElevenLabs conversation, and follows the tool result with a native multimodal image turn. The old local OCR route is policy-blocked.
+`omarvis see` is intercepted in-process, captures the current desktop, uploads it into the active ElevenLabs conversation, and follows the tool result with a native multimodal image turn. The old local OCR route is policy-blocked.
 
 Omarvis does not provide a wake word, always-on listening, general shell access, arbitrary JavaScript evaluation, tmux control, or agent-selected keystroke injection into ordinary desktop windows. Dictation is the sole injection path and types only the user's direct Scribe transcript.
 
@@ -141,12 +138,6 @@ Run the daemon in a terminal to see its JSON event stream and errors:
 
 ```bash
 bin/omarvis-run
-```
-
-Test a text-only session without microphone billing or PyAudio:
-
-```bash
-bin/omarvis-run --text-only --message "switch to workspace three"
 ```
 
 Print the generated prompt context:

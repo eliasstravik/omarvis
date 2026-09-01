@@ -18,7 +18,7 @@ ShellRoot {
   Service {
     id: service
     dictationDaemonEnabled: false
-    Component.onCompleted: service.start("agent")
+    Component.onCompleted: service.start()
   }
 
   Connections {

@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from omarvis.catalog import catalog_from_data
-from omarvis.policy import ASK_REFUSAL_REASON, PendingConfirmation, decide
+from omarvis.policy import PendingConfirmation, decide
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -347,7 +347,7 @@ def test_unapproved_browser_commands_and_flags_are_rejected(command):
     assert decide(command, catalog=omarchy_catalog()).kind == "reject"
 
 
-ASK_READ_COMMANDS = [
+READ_ONLY_COMMANDS = [
     "hyprctl clients -j",
     "hyprctl activewindow -j",
     "hyprctl activeworkspace -j",
@@ -384,31 +384,24 @@ ASK_READ_COMMANDS = [
     "omarchy theme current",
     "omarchy theme list",
     "omarchy system stats",
-    "omarchy commands",
-    "omarchy commands --json",
 ]
 
 
-@pytest.mark.parametrize("command", ASK_READ_COMMANDS)
-def test_ask_scope_allows_only_the_documented_read_routes(command):
-    decision = decide(command, catalog=omarchy_catalog(), scope="ask")
+@pytest.mark.parametrize("command", READ_ONLY_COMMANDS)
+def test_read_only_routes_run_without_confirmation(command):
+    decision = decide(command, catalog=omarchy_catalog())
 
     assert decision.kind == "run"
 
 
-@pytest.mark.parametrize("scope", ["agent", "ask"])
-def test_all_scopes_force_screen_reading_through_elevenlabs(scope):
-    decision = decide(
-        "omarchy capture text",
-        catalog=omarchy_catalog(),
-        scope=scope,
-    )
+def test_screen_reading_is_forced_through_elevenlabs():
+    decision = decide("omarchy capture text", catalog=omarchy_catalog())
 
     assert decision.kind == "reject"
     assert "use omarvis see" in decision.reason
 
 
-ASK_MUTATING_COMMANDS = [
+MUTATING_COMMANDS = [
     "hyprctl dispatch workspace 3",
     "hyprctl dispatch focuswindow class:firefox",
     "hyprctl dispatch killactive",
@@ -480,56 +473,41 @@ ASK_MUTATING_COMMANDS = [
 ]
 
 
-@pytest.mark.parametrize("command", ASK_MUTATING_COMMANDS)
-def test_every_agent_mutation_in_the_scope_table_is_refused_in_ask_mode(command):
-    catalog = omarchy_catalog()
-    agent_decision = decide(
-        command,
-        catalog=catalog,
-        dispatchers={"workspace", "focuswindow", "killactive", "exit"},
-    )
-    ask_decision = decide(
-        command,
-        catalog=catalog,
-        dispatchers={"workspace", "focuswindow", "killactive", "exit"},
-        scope="ask",
-    )
-
-    assert agent_decision.kind in {"run", "confirm"}
-    assert ask_decision.kind == "reject"
-    assert ask_decision.reason == ASK_REFUSAL_REASON
-    assert "ask mode" in ask_decision.reason
-    assert "SUPER + CTRL + J" in ask_decision.reason
-
-
-@pytest.mark.parametrize("command", ASK_READ_COMMANDS + ASK_MUTATING_COMMANDS)
-def test_explicit_agent_scope_is_identical_to_the_default_scope(command):
-    arguments = {
-        "catalog": omarchy_catalog(),
-        "dispatchers": {"workspace", "focuswindow", "killactive", "exit"},
-        "now": 100.0,
-    }
-
-    assert decide(command, **arguments, scope="agent") == decide(command, **arguments)
-
-
-def test_ask_scope_never_reaches_confirmation_machinery():
+@pytest.mark.parametrize("command", MUTATING_COMMANDS)
+def test_every_mutation_in_the_scope_table_runs_or_asks_for_confirmation(command):
     decision = decide(
-        "herdr worktree list",
+        command,
         catalog=omarchy_catalog(),
-        scope="ask",
-        confirmed=True,
-        pending=PendingConfirmation(("herdr", "worktree", "list"), 99.0, 1),
-        now=100.0,
+        dispatchers={"workspace", "focuswindow", "killactive", "exit"},
     )
 
-    assert decision.kind == "run"
+    assert decision.kind in {"run", "confirm"}
 
 
-@pytest.mark.parametrize("scope", ["agent", "ask"])
-def test_omarvis_see_is_the_only_internal_policy_route(scope):
+def test_policy_has_exactly_one_scope():
+    # Ask mode is gone: the agent call is the only session type, so `decide`
+    # must not carry a scope switch that could quietly resurrect a second one.
+    source = (Path(__file__).parents[1] / "omarvis" / "policy.py").read_text()
+
+    assert "scope" not in source
+    with pytest.raises(TypeError):
+        decide("herdr status", catalog=omarchy_catalog(), scope="ask")
+
+
+def test_omarvis_see_is_the_only_internal_policy_route():
     catalog = omarchy_catalog()
 
-    assert decide("omarvis see", catalog=catalog, scope=scope).kind == "run"
-    rejected = decide("omarvis see /tmp/file", catalog=catalog, scope=scope)
+    assert decide("omarvis see", catalog=catalog).kind == "run"
+    rejected = decide("omarvis see /tmp/file", catalog=catalog)
     assert rejected.kind == "reject"
+
+
+def test_herdr_help_and_bare_group_listings_run_immediately():
+    # The skill's learn-the-CLI flow: --help and bare group help are
+    # read-only and never need confirmation.
+    assert decide("herdr --help", catalog=omarchy_catalog()).kind == "run"
+    assert decide("herdr pane", catalog=omarchy_catalog()).kind == "run"
+    assert decide("herdr agent", catalog=omarchy_catalog()).kind == "run"
+    # Unknown groups and deeper flags still reject.
+    assert decide("herdr channel", catalog=omarchy_catalog()).kind == "reject"
+    assert decide("herdr --skill", catalog=omarchy_catalog()).kind == "reject"

@@ -7,12 +7,10 @@ import qs.Ui
 // Text-free voice strip, a sibling of the volume OSD: one state glyph and
 // one amplitude bar carry the whole story — who holds the floor (mic vs
 // speaker glyph, foreground vs accent fill), whether the mic is hot (the
-// bar.active attention color), a running command (cog in the glyph slot,
-// then a ✓ flash), and hands-free mode (the border goes to the attention
-// color, the same border-carries-state idiom the lock screen and polkit
-// use). Conversation and command text are deliberately absent: audio is the
-// channel, errors go to the notification server, and the bar widget's
-// tooltip carries the text on demand.
+// bar.active attention color), and hands-free mode (the border goes to the
+// attention color, the same border-carries-state idiom the lock screen and
+// polkit use). Conversation and command text are deliberately absent: audio
+// is the channel and errors go to the notification server.
 PanelWindow {
   id: hud
 
@@ -20,17 +18,12 @@ PanelWindow {
   property var shell: null
   property string hudPosition: "top-center"
   property bool speakingFallback: false
-  property bool toolSucceeded: false
-  // A call that just ended gets a short goodbye beat: the strip lingers
-  // with a waving hand before disappearing.
-  property bool waving: false
-  property string lastSessionState: "idle"
 
   readonly property bool dictating: service && service.dictationState !== "idle"
   // Session errors live in a desktop notification, not on the strip.
-  readonly property bool hudVisible: waving || (service
+  readonly property bool hudVisible: service
     && ((service.sessionState !== "idle" && service.sessionState !== "error")
-      || service.dictationState !== "idle"))
+      || service.dictationState !== "idle")
   readonly property real userLevel: !service ? 0.0 : (dictating ? service.dictationLevel : service.inLevel)
   readonly property string visualState: {
     if (!service) return "idle"
@@ -39,45 +32,39 @@ PanelWindow {
     return service.sessionState
   }
   readonly property bool errorState: visualState === "error"
-  readonly property bool toolRunning: service && service.runningCommand.length > 0
   readonly property bool handsFree: service && service.dictationLocked === true
+  // "Working": the agent has your words and is doing something — thinking
+  // or running a command — but has not started speaking yet. One generic
+  // hourglass, never per-tool glyphs or success flashes. A finished call
+  // simply disappears — no goodbye beat.
+  readonly property bool working: visualState === "thinking"
+    || (service && service.runningCommand.length > 0 && visualState !== "speaking")
+  // The websocket handshake can take a dozen seconds, and during it the
+  // microphone is emphatically not open. Waiting is its own state with its
+  // own glyph and its own beat: pulse means wait, a solid mic means talk.
+  readonly property bool waitingToConnect: visualState === "starting"
 
-  // Same glyph vocabulary as BarWidget (and the stock voxtype indicator for
-  // the dictation states), so bar and HUD read as one module. A running
-  // command is just another state, so it lives in the same slot: cog while
-  // executing, a short ✓ flash when done.
-  // Iconic actions get their own glyph while running; everything else is
-  // the wrench. Deliberately tiny — a glyph vocabulary only stays readable
-  // if it is small.
-  function toolGlyphFor(command) {
-    var cmd = String(command || "")
-    if (cmd.indexOf("screenshot") !== -1 || cmd.indexOf("screenrecord") !== -1
-      || cmd.indexOf("omarchy capture") !== -1 || cmd.indexOf("omarchy-capture") !== -1)
-      return String.fromCodePoint(0xF0100)
-    if (cmd.indexOf("theme") !== -1) return String.fromCodePoint(0xF03D8)
-    if (cmd.indexOf("omarchy system") !== -1 || cmd.indexOf("omarchy-system") !== -1)
-      return String.fromCodePoint(0xF0425)
-    return String.fromCodePoint(0xF05B7)
-  }
-
+  // Three glyphs, same as the bar and the phone: hourglass for any waiting
+  // or busywork (connecting, transcribing, working), microphone when the
+  // floor is yours, speaker for the agent's voice — plus the alert mark for
+  // failure. Nothing else, and a finished call simply disappears.
   readonly property string stateGlyph: {
     if (visualState === "error") return String.fromCodePoint(0xF0026)
-    if (waving && visualState === "idle") return String.fromCodePoint(0xF1821)
-    if (toolSucceeded) return "✓"
-    if (toolRunning) return toolGlyphFor(service.runningCommand)
-    if (visualState === "transcribing") return String.fromCodePoint(0xF06D7)
-    if (visualState === "thinking") return String.fromCodePoint(0xF051F)
+    if (visualState === "transcribing") return String.fromCodePoint(0xF051F)
+    // The hourglass, never the microphone: the mic glyph appears only once
+    // the session is live and the floor is actually yours.
+    if (waitingToConnect) return String.fromCodePoint(0xF051F)
     if (visualState === "speaking") return String.fromCodePoint(0xF057E)
+    if (working) return String.fromCodePoint(0xF051F)
     return String.fromCodePoint(0xF036C)
   }
   readonly property color stateGlyphColor: {
     if (errorState) return Color.urgent
-    if (waving && visualState === "idle") return Color.accent
-    // Agent-side activity is accent: its voice, its commands.
-    if (toolSucceeded || toolRunning || visualState === "speaking") return Color.accent
-    // Hot microphone: the bar.active attention color, per its shell.toml
-    // charter ("recording, voxtype, alerts, updates").
-    if (visualState === "listening" || visualState === "recording") return Color.bar.active
+    // Agent-side activity is accent: its voice and its working hourglass.
+    // Dictation wears the accent too — the theme's primary — while the
+    // bar.active attention color is reserved for the agent call's hot mic.
+    if (visualState === "speaking" || visualState === "recording" || working) return Color.accent
+    if (visualState === "listening") return Color.bar.active
     return Color.popups.text
   }
 
@@ -120,28 +107,9 @@ PanelWindow {
     target: hud.service
     function onSessionStateChanged() {
       hud.speakingFallback = false
-      var state = hud.service.sessionState
-      if (state === "idle"
-        && (hud.lastSessionState === "listening"
-          || hud.lastSessionState === "speaking"
-          || hud.lastSessionState === "thinking")) {
-        hud.waving = true
-        waveTimer.restart()
-      }
-      hud.lastSessionState = state
     }
     function onOutLevelChanged() {
       if (hud.service && hud.service.outLevel >= 0.02) hud.speakingFallback = false
-    }
-    function onRunningCommandChanged() {
-      if (hud.service && hud.service.runningCommand) {
-        hud.toolSucceeded = false
-        toolDoneTimer.stop()
-      }
-    }
-    function onCommandRan(command) {
-      hud.toolSucceeded = true
-      toolDoneTimer.restart()
     }
   }
 
@@ -151,20 +119,6 @@ PanelWindow {
     repeat: false
     running: hud.visible && hud.service && hud.service.sessionState === "speaking" && hud.service.outLevel < 0.02
     onTriggered: hud.speakingFallback = true
-  }
-
-  Timer {
-    id: toolDoneTimer
-    interval: 1000
-    repeat: false
-    onTriggered: hud.toolSucceeded = false
-  }
-
-  Timer {
-    id: waveTimer
-    interval: 900
-    repeat: false
-    onTriggered: hud.waving = false
   }
 
   BorderSurface {
@@ -186,13 +140,18 @@ PanelWindow {
     y: hud.topClearance
     radius: Style.cornerRadius
     color: Util.alpha(Color.popups.background, 0.97)
-    // Border carries mode: urgent on error, the attention color while the
-    // mic is locked open hands-free, the theme popups border otherwise.
+    // Border carries mode: urgent on error; a full accent frame while the
+    // mic is locked open hands-free; Omarchy's own unfocused-window border
+    // during hold-to-talk (same 2px geometry — "momentary" reads exactly
+    // like "unfocused" does on every window); the theme popups border for
+    // agent calls.
     borderSpec: hud.errorState
       ? Border.flat(Color.urgent, Math.max(1, Style.space(2)))
       : (hud.handsFree
-        ? Border.flat(Color.bar.active, Math.max(1, Style.space(2)))
-        : Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2))))
+        ? Border.flat(Color.accent, Math.max(1, Style.space(2)))
+        : (hud.dictating
+          ? Border.flat(hud.service ? hud.service.inactiveBorderColor : Util.alpha(Color.popups.text, 0.35), Math.max(1, Style.space(2)))
+          : Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))))
 
     Behavior on color { ColorAnimation { duration: 420; easing.type: Easing.InOutCubic } }
 
@@ -215,9 +174,18 @@ PanelWindow {
           anchors.centerIn: parent
           text: hud.stateGlyph
           color: hud.stateGlyphColor
-          opacity: hud.visualState === "starting" ? 0.45 : 1.0
           font.family: Style.font.family
           font.pixelSize: Style.font.iconLarge
+
+          // The shell's wait pulse: 950ms InOutSine, alwaysRunToEnd so the
+          // glyph lands back at full opacity the moment the call connects.
+          SequentialAnimation on opacity {
+            running: hud.waitingToConnect && hud.visible
+            loops: Animation.Infinite
+            alwaysRunToEnd: true
+            NumberAnimation { from: 1.0; to: 0.35; duration: 950; easing.type: Easing.InOutSine }
+            NumberAnimation { from: 0.35; to: 1.0; duration: 950; easing.type: Easing.InOutSine }
+          }
         }
       }
 
@@ -230,6 +198,11 @@ PanelWindow {
         color: Util.alpha(Color.popups.text, 0.45)
 
         Rectangle {
+          objectName: "omarvisLevelFill"
+          // A dead zero-length meter would read as a dead microphone while
+          // the call is still connecting, so the amplitude fill yields to the
+          // indeterminate sweep until there is real audio to show.
+          visible: !hud.waitingToConnect
           height: parent.height
           width: parent.width * hud.meterLevel
           color: hud.visualState === "speaking" ? Color.accent : Color.popups.text
@@ -237,6 +210,23 @@ PanelWindow {
           Behavior on width {
             enabled: hud.visible
             NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+          }
+        }
+
+        Rectangle {
+          id: meterSweep
+          objectName: "omarvisMeterSweep"
+          visible: hud.waitingToConnect
+          height: parent.height
+          width: Math.round(parent.width / 3)
+          color: Color.accent
+
+          SequentialAnimation on x {
+            running: meterSweep.visible && hud.visible
+            loops: Animation.Infinite
+            alwaysRunToEnd: true
+            NumberAnimation { from: 0; to: meter.width - meterSweep.width; duration: 950; easing.type: Easing.InOutSine }
+            NumberAnimation { from: meter.width - meterSweep.width; to: 0; duration: 950; easing.type: Easing.InOutSine }
           }
         }
       }

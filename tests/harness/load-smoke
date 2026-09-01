@@ -1,0 +1,40 @@
+#!/bin/bash
+#
+# Loads every QML surface the plugin ships and walks the whole state
+# vocabulary, so binding errors and typos in state expressions surface as QML
+# errors instead of waiting for a live call. Draws nothing: no session is
+# started and no panel is opened.
+
+set -euo pipefail
+
+HARNESS_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+REPO_DIR=$(cd -- "$HARNESS_DIR/../.." && pwd)
+LOG_PATH=${1:-"$(mktemp -t omarvis-smoke-XXXXXX.log)"}
+
+export OMARVIS_REPO="$REPO_DIR"
+export QML_IMPORT_PATH="$(dirname -- "$REPO_DIR")${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
+
+# The QML surfaces import the shell's qs.Commons/qs.Ui singletons. Quickshell
+# resolves `qs` against the config root (this directory), so expose the
+# packaged shell modules inside it.
+ln -sfn /usr/share/omarchy/shell/Commons "$HARNESS_DIR/Commons"
+ln -sfn /usr/share/omarchy/shell/Ui "$HARNESS_DIR/Ui"
+
+timeout 45 quickshell --no-color -p "$HARNESS_DIR/LoadSmoke.qml" >"$LOG_PATH" 2>&1 || true
+
+echo "log: $LOG_PATH"
+# The harness's own trace lines name an "error" session state, so they are
+# excluded before scanning for real QML failures.
+if grep -v 'omarvis smoke:' "$LOG_PATH" \
+  | grep -Eq 'ERROR|is not defined|Unable to assign|Binding loop|TypeError|ReferenceError'; then
+  grep -v 'omarvis smoke:' "$LOG_PATH" \
+    | grep -En 'ERROR|is not defined|Unable to assign|Binding loop|TypeError|ReferenceError'
+  echo "FAIL: QML errors above" >&2
+  exit 1
+fi
+grep -q 'omarvis smoke: done' "$LOG_PATH" || {
+  echo "FAIL: harness did not finish" >&2
+  tail -20 "$LOG_PATH" >&2
+  exit 1
+}
+echo "OK: all QML surfaces loaded and every state evaluated"

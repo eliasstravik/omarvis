@@ -10,8 +10,6 @@ Item {
   property string lastUser: ""
   property string lastAgent: ""
   property string lastError: ""
-  property string currentMode: "agent"
-  property string pendingMode: ""
   property string dictationState: "idle"
   property bool dictationLocked: false
   property real inLevel: 0.0
@@ -53,7 +51,6 @@ Item {
       if (String(event.state || "idle") !== root.sessionState && event.state !== "error")
         root.lastError = ""
       root.sessionState = String(event.state || "idle")
-      if (event.mode) root.currentMode = root.normalizeMode(event.mode)
     }
     else if (event.event === "level") {
       root.inLevel = Math.max(0, Math.min(1, Number(event.in || 0)))
@@ -123,25 +120,14 @@ Item {
     }
   }
 
-  function normalizeMode(mode): string {
-    return String(mode || "agent") === "ask" ? "ask" : "agent"
-  }
-
-  function start(mode = "agent"): string {
-    var requestedMode = root.normalizeMode(mode)
+  // Agent is the only session type, so start/stop/toggle take no arguments
+  // and a running daemon is simply left alone.
+  function start(): string {
     if (webDaemon.running) webDaemon.write("end-session\n")
-    if (daemon.running) {
-      if (requestedMode === root.currentMode) return "already-running"
-      root.pendingMode = requestedMode
-      root.stopRequested = true
-      daemon.signal(15)
-      killTimer.restart()
-      return "restarting"
-    }
+    if (daemon.running) return "already-running"
     killTimer.stop()
     root.stopRequested = false
     root.lastError = ""
-    root.currentMode = requestedMode
     root.sessionState = "starting"
     daemon.running = true
     return "starting"
@@ -149,18 +135,14 @@ Item {
 
   function stop(): string {
     if (!daemon.running) return "not-running"
-    root.pendingMode = ""
     root.stopRequested = true
     daemon.signal(15)
     killTimer.restart()
     return "stopping"
   }
 
-  function toggle(mode = "agent"): string {
-    var requestedMode = root.normalizeMode(mode)
-    if (!daemon.running) return root.start(requestedMode)
-    if (requestedMode === root.currentMode) return root.stop()
-    return root.start(requestedMode)
+  function toggle(): string {
+    return daemon.running ? root.stop() : root.start()
   }
 
   function dictate(action): string {
@@ -207,6 +189,34 @@ Item {
       "-u", "normal",
       "Omarvis voice error", String(message)])
   }
+
+  // Remote-service failures carry repair instructions far too long for the
+  // panel, so they take the same route the voice errors do; the panel keeps
+  // one short line. Notify once per distinct problem state, not per poll.
+  property string notifiedRemoteState: ""
+
+  function remoteProblemDetail(state): string {
+    if (state === "needs-tailscale")
+      return "Connect Tailscale on this computer, then try Remote access again."
+    if (state === "needs-operator")
+      return "Run in a terminal: sudo tailscale set --operator=" + Quickshell.env("USER")
+    return root.remoteError || "Tailscale Serve failed to publish Omarvis."
+  }
+
+  onRemoteStateChanged: {
+    if (remoteState === "off" || remoteState === "serving") {
+      notifiedRemoteState = ""
+      return
+    }
+    if (remoteState === notifiedRemoteState) return
+    notifiedRemoteState = remoteState
+    Quickshell.execDetached(["omarchy-notification-send",
+      "--app-name", "Omarvis",
+      "-g", String.fromCodePoint(0xF0026),
+      "-u", "normal",
+      "Omarvis remote access", remoteProblemDetail(remoteState)])
+  }
+
   Component.onCompleted: {
     updateDictationMarker()
     updateEscapeBind()
@@ -319,10 +329,12 @@ Item {
       return
     }
     if (event.event === "remote") {
-      root.remoteState = String(event.state || "off")
+      // Error text first: onRemoteStateChanged reads it to build the
+      // notification, so a stale message must never win the race.
       root.remoteError = String(event.error || "")
       root.remoteUrl = String(event.url || "")
       root.qrMatrix = event.qr_matrix || []
+      root.remoteState = String(event.state || "off")
     } else if (event.event === "phone") {
       root.phoneSessionActive = !!event.active
       if (!root.phoneSessionActive) root.phoneRunningCommand = ""
@@ -342,7 +354,7 @@ Item {
     id: daemon
     command: root.daemonCommand.length > 0
       ? root.daemonCommand
-      : [root.pluginDir + "/bin/omarvis-run", "--mode", root.currentMode]
+      : [root.pluginDir + "/bin/omarvis-run"]
     stdout: SplitParser {
       onRead: data => root.handleEvent(String(data))
     }
@@ -364,11 +376,6 @@ Item {
       }
       if (!expectedStop && exitCode !== 0 && !root.lastError)
         root.lastError = "Daemon exited with code " + exitCode
-      if (root.pendingMode) {
-        var restartMode = root.pendingMode
-        root.pendingMode = ""
-        Qt.callLater(function() { root.start(restartMode) })
-      }
     }
   }
 
@@ -410,12 +417,12 @@ Item {
       }
       if (exitCode === 3) {
         root.webBindFailed = true
-        root.remoteState = "serve-failed"
         if (!root.remoteError) root.remoteError = "Port 4763 is already in use. Remote access was not restarted."
+        root.remoteState = "serve-failed"
         return
       }
-      root.remoteState = "serve-failed"
       if (!root.remoteError) root.remoteError = "Remote service exited with code " + exitCode
+      root.remoteState = "serve-failed"
       webRestart.restart()
     }
   }
@@ -452,6 +459,85 @@ Item {
     interval: 2000
     repeat: false
     onTriggered: if (root.dictationDaemonEnabled && !dictationDaemon.running) dictationDaemon.running = true
+  }
+
+  // Live view of the user's actual Omarvis keybindings, parsed from the
+  // Hyprland bindings file and re-parsed on every save, so the panel shows
+  // real mappings — rerouted keys included — never just the defaults.
+  property var keybindings: []
+
+  function parseKeybindings(content) {
+    var actions = [
+      { match: 'omarchy-shell omarvis dictate start"', label: "Dictation (hold)" },
+      { match: 'bin/omarvis-space"', label: "Hands-free dictation" },
+      { match: 'omarchy-shell omarvis toggle"', label: "Talk" },
+      { match: 'omarchy-shell omarvis toggleRemote"', label: "Remote access" },
+      { match: 'omarchy-shell omarvis panel"', label: "Panel" },
+    ]
+    var found = []
+    var lines = String(content || "").split("\n")
+    for (var a = 0; a < actions.length; a++) {
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i]
+        if (line.trim().indexOf("--") === 0) continue
+        if (line.indexOf(actions[a].match) === -1) continue
+        var keys = line.match(/bind\(\s*"([^"]+)"/)
+        if (keys) {
+          found.push({ label: actions[a].label, keys: keys[1] })
+          break
+        }
+      }
+    }
+    // Hands-free is a chord, not a binding of its own: SPACE is pressed
+    // while the dictation keys are still held, so it displays as the
+    // dictation keys plus the chord binding's final key — composed from
+    // both live bindings so rebinding either side keeps it truthful.
+    for (var h = 0; h < found.length; h++) {
+      if (found[h].label !== "Hands-free dictation") continue
+      var chordKey = found[h].keys.split("+").pop().trim()
+      for (var d = 0; d < found.length; d++) {
+        if (found[d].label === "Dictation (hold)") {
+          found[h].keys = found[d].keys + " + " + chordKey
+          break
+        }
+      }
+    }
+    root.keybindings = found
+  }
+
+  // Omarchy's native unfocused-window border (Hyprland's
+  // general:col.inactive_border, rgba(595959aa) in the stock looknfeel).
+  // The HUD reuses it for the ephemeral hold-to-talk dictation frame, so
+  // "momentary" reads exactly like "unfocused" does everywhere else.
+  property color inactiveBorderColor: Qt.rgba(0x59 / 255, 0x59 / 255, 0x59 / 255, 0xAA / 255)
+
+  function applyInactiveBorderJson(payload) {
+    try {
+      var gradient = String(JSON.parse(payload).gradient || "").trim().split(/\s+/)[0]
+      if (/^[0-9a-fA-F]{8}$/.test(gradient))
+        root.inactiveBorderColor = "#" + gradient
+    } catch (error) {
+      // hyprctl missing or Hyprland not running — keep the stock fallback.
+    }
+  }
+
+  Process {
+    running: true
+    command: ["hyprctl", "-j", "getoption", "general:col.inactive_border"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyInactiveBorderJson(text)
+    }
+  }
+
+  FileView {
+    id: bindingsFile
+    path: Quickshell.env("HOME") + "/.config/hypr/bindings.lua"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.parseKeybindings(text())
+    onLoadFailed: root.keybindings = []
+    onFileChanged: reload()
   }
 
   FileView {
@@ -493,17 +579,13 @@ Item {
   IpcHandler {
     target: "omarvis"
 
-    // Quickshell only exports IPC parameters that have explicit QML types.
-    // Keep the original no-argument Agent routes for existing installs, and
-    // use separate typed routes when a mode is selected explicitly.
-    function toggle(): string { return root.toggle("agent") }
-    function toggleMode(mode: string): string { return root.toggle(mode) }
-    function start(): string { return root.start("agent") }
-    function startMode(mode: string): string { return root.start(mode) }
+    function toggle(): string { return root.toggle() }
+    function start(): string { return root.start() }
     function stop(): string { return root.stop() }
     function dictate(action: string): string { return root.dictate(action) }
     function panel(): string { root.panelRequested(); return "opening" }
     function setRemote(enabled: bool): string { return root.setRemoteEnabled(enabled) }
+    function toggleRemote(): string { return root.setRemoteEnabled(!root.remoteEnabled) }
     // "escape" collides with the JS global, which QML rejects as a method
     // name, hence "esc".
     function esc(): string { return root.escapeAction() }
@@ -513,7 +595,6 @@ Item {
         lastUser: root.lastUser,
         lastAgent: root.lastAgent,
         lastError: root.lastError,
-        currentMode: root.currentMode,
         dictationState: root.dictationState,
         dictationLocked: root.dictationLocked,
         inLevel: root.inLevel,

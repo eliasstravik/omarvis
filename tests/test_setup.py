@@ -1,5 +1,48 @@
 from pathlib import Path
 
+ROOT = Path(__file__).parent.parent
+SHIPPED = (
+    *sorted((ROOT / "omarvis").glob("*.py")),
+    *sorted(ROOT.glob("*.qml")),
+    *sorted(path for path in (ROOT / "bin").iterdir() if path.name != "omarvis-setup"),
+    ROOT / "assets" / "web" / "index.html",
+    ROOT / "manifest.json",
+    ROOT / "qmldir",
+    ROOT / "agent" / "prompt.md",
+)
+# Everything Ask mode and the typed one-shot left behind. bin/omarvis-setup is
+# excluded above because it names these on purpose, to delete stale bindings.
+RETIRED = (
+    "text_only",
+    "--text-only",
+    "ask_agent_id",
+    "prompt-ask",
+    "toggleMode",
+    "startMode",
+    "currentMode",
+    "ASK_REFUSAL",
+    "bin/omarvis-text",
+    "Start Ask",
+    "Omarvis Ask",
+)
+
+
+def test_nothing_the_plugin_ships_still_mentions_the_retired_modes():
+    offenders = [
+        f"{path.relative_to(ROOT)}: {token}"
+        for path in SHIPPED
+        for token in RETIRED
+        if token in path.read_text()
+    ]
+
+    assert offenders == []
+
+
+def test_the_retired_entry_points_are_deleted():
+    assert not (ROOT / "bin" / "omarvis-text").exists()
+    assert not (ROOT / "agent" / "prompt-ask.md").exists()
+    assert not (ROOT / "BarWidget.qml").exists()
+
 
 def test_setup_unbinds_super_j_before_installing_press_and_release_pair():
     script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
@@ -11,13 +54,39 @@ def test_setup_unbinds_super_j_before_installing_press_and_release_pair():
     assert "sed -i" in script
 
 
-def test_setup_migrates_legacy_ask_ipc_binding():
+def test_setup_removes_retired_ask_and_text_bindings():
     script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
 
-    assert 'ASK_LEGACY_BINDING=' in script
-    assert 'omarchy-shell omarvis toggleMode ask' in script
-    assert 'needs_ask_rebind=true' in script
-    assert 'sed -i "\\|$ASK_LEGACY_BINDING|d"' in script
+    # Ask mode and the typed one-shot no longer exist. Setup must not offer
+    # them, and must delete whatever an older install left behind.
+    assert "ASK_BINDING" not in script
+    assert "TEXT_BINDING" not in script
+    assert "has_retired_bindings=true" in script
+    assert (
+        r"""sed -i -E '/omarvis (toggle|toggleMode) ask"|\/bin\/omarvis-text"/d'"""
+        in script
+    )
+    assert "del(.ask_agent_id)" in script
+    assert "ask_agent_id: (" not in script
+
+
+def test_setup_offers_only_the_surviving_bindings():
+    script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
+
+    for binding in (
+        "AGENT_BINDING",
+        "DICTATE_START_BINDING",
+        "DICTATE_STOP_BINDING",
+        "PANEL_BINDING",
+    ):
+        assert f"{binding}=" in script
+    # SUPER+SHIFT+J was freed by the Ask removal and now toggles remote
+    # access; SUPER+ALT+J (freed by the typed one-shot's removal) opens the
+    # panel — SUPER+ALT is Omarchy's most common two-modifier tier, and the
+    # stock config never stacks CTRL+ALT.
+    assert 'o.bind("SUPER + SHIFT + J", "Omarvis Remote", "omarchy-shell omarvis toggleRemote")' in script
+    assert 'o.bind("SUPER + ALT + J", "Omarvis Panel", "omarchy-shell omarvis panel")' in script
+    assert "SUPER + CTRL + ALT + J" not in script
 
 
 def test_setup_removes_legacy_external_vision_configuration():
@@ -28,7 +97,7 @@ def test_setup_removes_legacy_external_vision_configuration():
     assert "vision_api_key" not in script
 
 
-def test_setup_defaults_both_agents_to_the_omarvis_voice():
+def test_setup_defaults_the_agent_to_the_omarvis_voice():
     script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
 
     assert 'voice_id: (.voice_id // "JSWO6cw2AyFE324d5kEr")' in script
@@ -38,7 +107,10 @@ def test_setup_pins_metered_audio_sdk_and_preserves_ui_defaults():
     script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
 
     assert '"elevenlabs==2.65.0"' in script
-    assert "earcons: (.ui.earcons // true)" in script
+    # Sounds are gone for good: no earcons default, and setup prunes the
+    # stale key from existing configs.
+    assert "del(.earcons)" in script
+    assert "earcons: (" not in script
     assert 'hud_position: (.ui.hud_position // "top-center")' in script
 
 
@@ -60,7 +132,7 @@ def test_setup_installs_native_panel_keybinding():
     script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
 
     assert 'PANEL_BINDING=' in script
-    assert 'SUPER + CTRL + ALT + J' in script
+    assert 'SUPER + ALT + J' in script
     assert 'omarchy-shell omarvis panel' in script
     assert 'missing_bindings+=("$PANEL_BINDING")' in script
 
