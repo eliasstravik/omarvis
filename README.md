@@ -4,7 +4,7 @@
 
 <p align="center">Omarvis lets you hand desktop work to a voice agent when stopping to click through it would break your flow, by putting a realtime <a href="https://omarchy.org">Omarchy</a> voice session one hotkey away and letting it run only allowlisted Omarchy, Hyprland, Herdr, and browser commands.</p>
 
-<p align="center"><img src="assets/omarvis-voice-flow.svg" width="88%" alt="A spoken request goes from you through a policy-checked voice agent and comes back as a workspace switch, an open PR, and a prompted Herdr agent" /></p>
+<p align="center"><img src="preview.png" width="88%" alt="An Omarchy desktop with Omarvis mid-conversation: the speaking HUD under the bar, and the panel open showing keybindings and the remote-access QR" /></p>
 
 <p align="center"><a href="https://github.com/eliasstravik/omarvis/blob/main/docs/getting-started.md"><img src="assets/buttons/talk-to-your-desktop.svg" alt="Talk to your desktop" /></a></p>
 
