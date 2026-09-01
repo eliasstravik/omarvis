@@ -443,6 +443,8 @@ fi
 note "· Memory: personalize $PROFILE_PATH (up to 2000 characters are used)"
 note "· Log: $LOG_PATH"
 echo
+printf '🎉 %sThat'"'"'s everything — your desktop can talk now. Have fun!%s\n' "$BOLD" "$RESET"
+echo
 printf '%sNext:%s press SUPER + CTRL + J and say "switch to workspace 2" — or click the bar microphone.\n' "$BOLD" "$RESET"
 echo
 echo "Remote phone access stays off until you enable it in the Omarvis panel."
