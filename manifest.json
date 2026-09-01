@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.eliasstravik.omarvis",
   "name": "Omarvis",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "author": "Elias Stravik",
   "license": "MIT",
   "description": "Voice control for Omarchy via ElevenLabs Agents",
