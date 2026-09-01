@@ -84,11 +84,15 @@ Chromium, through `agent-browser`. By default Omarvis opens a fresh snapshot cop
 
 ### What does a session cost?
 
-The plugin costs nothing. ElevenLabs bills Agents sessions by conversation minute, plus pass-through LLM usage. Sessions are capped at five minutes and start only on your hotkey press.
+The plugin is free and MIT licensed. ElevenLabs bills Agents sessions by conversation minute, plus pass-through LLM usage. Sessions are capped at five minutes and start only on your hotkey press.
 
 ### What gets sent to ElevenLabs?
 
 During a session: your microphone audio, your profile memory, the command catalogs, and your window titles, workspace number, Herdr agent names, and browser tab titles and hosts. A desktop screenshot is uploaded only when you explicitly ask about your screen. Nothing is sent while idle.
+
+### How do I uninstall it?
+
+Run `omarchy plugin remove io.github.eliasstravik.omarvis` and delete the two runtime directories. Setup never touched your keybindings without asking and kept a timestamped backup. The [getting-started guide](docs/getting-started.md#uninstall) has the exact steps.
 
 ### What does Omarvis not do?
 

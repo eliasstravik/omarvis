@@ -13,7 +13,7 @@ def panel_source():
 def test_manifest_repoints_existing_bar_widget_key_without_identity_migration():
     manifest = json.loads((ROOT / "manifest.json").read_text())
 
-    assert manifest["id"] == "omarvis.voice"
+    assert manifest["id"] == "io.github.eliasstravik.omarvis"
     assert manifest["kinds"] == ["service", "bar-widget"]
     assert manifest["entryPoints"]["barWidget"] == "Panel.qml"
     assert manifest["barWidget"]["allowMultiple"] is False

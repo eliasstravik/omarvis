@@ -9,7 +9,7 @@ import qs.Commons
 // never grows past a glance.
 Panel {
   id: root
-  moduleName: "omarvis.voice"
+  moduleName: "io.github.eliasstravik.omarvis"
   manageIpc: false
 
   property var svc: null
