@@ -319,6 +319,61 @@ HERDR_GROUPS = (
     "api",
 )
 
+HERDR_SKILL_PREFACE = """\
+How you use Herdr: you control the focused Herdr session from outside a
+pane, through the `run` tool. Ignore the HERDR_ENV check and the rule
+against controlling Herdr from outside below — they are for agents embedded
+inside panes; every command you issue is validated by Omarvis policy
+instead. The flags --wait, --remote, --session and --until* are rejected.
+To learn syntax, `herdr --help` and bare group listings like `herdr pane`
+are allowed."""
+
+
+def _adapt_herdr_skill(raw: str) -> str:
+    """Turn `herdr --skill` into Omarvis guidance.
+
+    The document ships as a skill for coding agents embedded in Herdr
+    panes: YAML frontmatter plus an HERDR_ENV gate. Omarvis legitimately
+    drives the focused session from outside, so the frontmatter is dropped
+    and a preface overrides the embedded-agent rules.
+    """
+    text = raw.strip()
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            text = text[end + 4 :].lstrip("\n")
+    return HERDR_SKILL_PREFACE + "\n\n" + text
+
+
+def load_herdr_skill(
+    *,
+    runner: Callable[[Sequence[str], float], CommandOutput] = _default_runner,
+    cache_dir: Path | None = None,
+) -> str:
+    """The `herdr --skill` expert guide, adapted for Omarvis and cached by
+    herdr version. Empty when herdr is not installed."""
+    try:
+        version_output = runner(("herdr", "--version"), 2.0)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    version = (
+        version_output.stdout.strip() if version_output.returncode == 0 else "unknown"
+    )
+    cache_root = cache_dir or Path.home() / ".cache" / "omarvis"
+    cache_path = cache_root / f"herdr-skill-{_cache_key(version)}.md"
+    if cache_path.exists():
+        return cache_path.read_text()
+    try:
+        output = runner(("herdr", "--skill"), 3.0)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if output.returncode != 0 or not output.stdout.strip():
+        return ""
+    adapted = _adapt_herdr_skill(output.stdout)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(adapted)
+    return adapted
+
 HYPR_DISPATCHER_DOCS = {
     "workspace": "workspace <n|+1|-1>",
     "movetoworkspace": "movetoworkspace <n> (moves the focused window; focus the target first)",
@@ -564,6 +619,7 @@ def catalog_variables(
         "command_catalog": load_catalog(runner=runner).prompt_text,
         "hyprland_dispatchers": hyprland_prompt(),
         "herdr_catalog": load_herdr_catalog(runner=runner).prompt_text,
+        "herdr_skill": load_herdr_skill(runner=runner),
         "browser_catalog": browser_catalog().prompt_text,
         "current_state": current_state(config=config, runner=runner),
         "profile": profile_memory(config),

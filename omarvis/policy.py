@@ -72,6 +72,8 @@ HERDR_CONFIRM = frozenset(
 )
 HERDR_IMMEDIATE = HERDR_IMMEDIATE | frozenset({("worktree", "list")})
 HERDR_ALLOW = HERDR_IMMEDIATE | HERDR_CONFIRM
+# A bare group prints its help — read-only, and how the agent learns syntax.
+HERDR_HELP_GROUPS = frozenset(route[0] for route in HERDR_ALLOW if len(route) > 1)
 
 BROWSER_SINGLE_ALLOW = frozenset(
     {
@@ -106,40 +108,6 @@ BROWSER_GET_ALLOW = frozenset(
 )
 BROWSER_IS_ALLOW = frozenset({"visible", "enabled", "checked"})
 BROWSER_CONFIRM = frozenset({("close",), ("download",), ("upload",), ("drag",)})
-
-ASK_HERDR_ROUTES = frozenset(
-    route
-    for route in HERDR_ALLOW
-    if route == ("status",)
-    or route == ("api", "snapshot")
-    or route[-1]
-    in {"list", "get", "read", "explain", "process-info", "neighbor", "edges"}
-)
-ASK_BROWSER_ROUTES = frozenset(
-    {
-        ("snapshot",),
-        ("tab", "list"),
-        ("screenshot",),
-        ("scroll",),
-        ("scrollintoview",),
-        *(("get", command) for command in BROWSER_GET_ALLOW),
-        *(("is", command) for command in BROWSER_IS_ALLOW),
-    }
-)
-ASK_OMARCHY_ROUTES = frozenset(
-    {
-        ("omarchy", "capture", "screenshot"),
-        ("omarchy", "theme", "current"),
-        ("omarchy", "theme", "list"),
-        ("omarchy", "system", "stats"),
-        ("omarchy", "commands"),
-    }
-)
-ASK_REFUSAL_REASON = (
-    "Omarvis is in ask mode and cannot perform that action; "
-    "tell the user to press SUPER + CTRL + J for Agent mode."
-)
-
 
 @dataclass(frozen=True)
 class Decision:
@@ -269,6 +237,12 @@ def _decide_herdr(
 ) -> Decision:
     if len(argv) < 2:
         return Decision("reject", reason="bare herdr is not allowed")
+    # The skill's learn-the-CLI flow: `herdr --help` and a bare group
+    # listing (`herdr pane`) print help and are always safe to run.
+    if argv[1:] == ("--help",):
+        return Decision("run", argv)
+    if len(argv) == 2 and argv[1] in HERDR_HELP_GROUPS:
+        return Decision("run", argv)
     route = (argv[1],) if argv[1] == "status" else tuple(argv[1:3])
     if route not in HERDR_ALLOW:
         return Decision("reject", reason="unknown herdr route")
@@ -397,44 +371,6 @@ def _omarchy_route(
     return None
 
 
-def _decide_ask(
-    command: str,
-    argv: tuple[str, ...],
-    *,
-    catalog: Catalog,
-) -> Decision:
-    if argv[0] == "hyprctl" and argv in HYPR_READ_COMMANDS:
-        return Decision("run", argv)
-    if argv[0] == "herdr":
-        route = (argv[1],) if len(argv) > 1 and argv[1] == "status" else tuple(argv[1:3])
-        if route in ASK_HERDR_ROUTES:
-            arguments = argv[1 + len(route) :]
-            if not any(
-                token in {"--wait", "--remote", "--session"}
-                or token.startswith("--until")
-                for token in arguments
-            ):
-                return Decision("run", argv)
-    if argv[0] == "agent-browser":
-        matched = _browser_route(argv)
-        if matched is not None and matched[0] in ASK_BROWSER_ROUTES:
-            decision = _decide_browser(
-                command,
-                argv,
-                confirmed=False,
-                pending=None,
-                now=time.monotonic(),
-                approved_categories=frozenset(),
-            )
-            if decision.kind == "run":
-                return decision
-    if argv[0] == "omarchy":
-        route = _omarchy_route(argv, catalog)
-        if route in ASK_OMARCHY_ROUTES or argv[:2] == ("omarchy", "commands"):
-            return Decision("run", argv)
-    return Decision("reject", reason=ASK_REFUSAL_REASON)
-
-
 def decide(
     command: str,
     *,
@@ -443,7 +379,6 @@ def decide(
     pending: PendingConfirmation | None = None,
     now: float | None = None,
     dispatchers: set[str] | frozenset[str] = frozenset(),
-    scope: str = "agent",
     approved_categories: set[str] | frozenset[str] = frozenset(),
 ) -> Decision:
     approved = frozenset(approved_categories)
@@ -468,12 +403,6 @@ def decide(
             "reject",
             reason="OCR is disabled; use omarvis see for an ElevenLabs screenshot.",
         )
-    if scope == "ask":
-        if argv == ("omarvis", "see"):
-            return Decision("run", argv)
-        return _decide_ask(command, argv, catalog=catalog)
-    if scope != "agent":
-        return Decision("reject", reason="unknown policy scope")
     if argv[0] == "omarvis":
         if argv == ("omarvis", "see"):
             return Decision("run", argv)

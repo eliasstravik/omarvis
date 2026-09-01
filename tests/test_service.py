@@ -1,14 +1,32 @@
 from pathlib import Path
 
 
-def test_ipc_exports_agent_compatibility_and_typed_mode_routes():
+def test_ipc_exports_one_modeless_session_route():
     service = (Path(__file__).parent.parent / "Service.qml").read_text()
 
-    assert 'function toggle(): string { return root.toggle("agent") }' in service
-    assert 'function toggleMode(mode: string): string { return root.toggle(mode) }' in service
-    assert 'function start(): string { return root.start("agent") }' in service
-    assert 'function startMode(mode: string): string { return root.start(mode) }' in service
-    assert 'function toggle(mode = "agent")' not in service.split("IpcHandler", 1)[1]
+    # Agent is the only session type, so start/stop/toggle take no arguments
+    # and the mode-selecting IPC routes are gone for good.
+    assert "function toggle(): string { return root.toggle() }" in service
+    assert "function start(): string { return root.start() }" in service
+    assert "function stop(): string { return root.stop() }" in service
+    assert "toggleMode" not in service
+    assert "startMode" not in service
+    assert "currentMode" not in service
+    assert "pendingMode" not in service
+    assert "normalizeMode" not in service
+    assert '"--mode"' not in service
+
+
+def test_remote_failures_go_to_the_notification_server_once_per_state():
+    service = (Path(__file__).parent.parent / "Service.qml").read_text()
+
+    # The panel gets one short line; the repair instructions are too long for
+    # it, so they take the same route the voice errors do.
+    assert "onRemoteStateChanged:" in service
+    assert "notifiedRemoteState" in service
+    assert "function remoteProblemDetail(state): string" in service
+    assert '"Omarvis remote access"' in service
+    assert "sudo tailscale set --operator=" in service
 
 
 def test_service_wires_hud_event_protocol_and_clears_stale_state():
@@ -121,3 +139,37 @@ def test_remote_daemon_is_supervised_and_marker_is_direction_of_truth():
         'return "retrying"',
     ):
         assert expected in service
+
+
+def test_keybindings_are_parsed_live_from_the_hyprland_bindings_file():
+    service = (Path(__file__).parent.parent / "Service.qml").read_text()
+
+    # The panel shows the user's real mappings, not the defaults: the
+    # bindings file is watched and re-parsed on every save.
+    assert '"/.config/hypr/bindings.lua"' in service
+    assert "onLoaded: root.parseKeybindings(text())" in service
+    assert "onFileChanged: reload()" in service
+    # Release-pair lines and Lua comments never produce rows.
+    assert 'indexOf("--") === 0' in service
+    for match in (
+        'omarchy-shell omarvis dictate start"',
+        'bin/omarvis-space"',
+        'omarchy-shell omarvis toggle"',
+        'omarchy-shell omarvis toggleRemote"',
+        'omarchy-shell omarvis panel"',
+    ):
+        assert match in service
+    # Hands-free is a chord: it displays as the dictation keys plus the
+    # chord binding's final key (SUPER + J + SPACE), composed from both
+    # live bindings rather than showing the raw SUPER + SPACE bind.
+    assert 'found[d].keys + " + " + chordKey' in service
+
+
+def test_hands_free_displays_as_a_chord_on_top_of_the_dictation_keys():
+    service = (Path(__file__).parent.parent / "Service.qml").read_text()
+
+    # SPACE is pressed while the dictation keys are still held, so the row
+    # composes both live bindings ("SUPER + J + SPACE"), never the raw
+    # SUPER+SPACE binding on its own.
+    assert 'found[d].keys + " + " + chordKey' in service
+    assert 'split("+").pop().trim()' in service

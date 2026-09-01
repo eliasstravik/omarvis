@@ -32,7 +32,6 @@ from .policy import (
     decide,
 )
 from .levels import LevelThrottle, rms_level
-from .sounds import play as play_sound
 
 
 @dataclass(frozen=True)
@@ -127,7 +126,6 @@ class RunToolHandler:
         event_sink: Callable[[Mapping[str, Any]], None] | None = None,
         state_provider: Callable[[], str] | None = None,
         state_refresh_delay: float = 2.0,
-        scope: str = "agent",
         screenshot_sender: Callable[[], str] | None = None,
     ) -> None:
         self.catalog = catalog
@@ -140,7 +138,6 @@ class RunToolHandler:
         self.event_sink = event_sink
         self.state_provider = state_provider
         self.state_refresh_delay = state_refresh_delay
-        self.scope = scope
         self.screenshot_sender = screenshot_sender
         self._condition = threading.Condition()
         self._pending: PendingConfirmation | None = None
@@ -437,7 +434,6 @@ class RunToolHandler:
                 confirmed=confirmed,
                 pending=pending,
                 now=self.clock(),
-                scope=self.scope,
                 approved_categories=approved_categories,
             )
             if decision.kind == "reject":
@@ -593,7 +589,6 @@ class RunToolHandler:
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "agent_id": "",
-    "ask_agent_id": "",
     "llm": "gpt-5.6-sol",
     "voice_id": "JSWO6cw2AyFE324d5kEr",
     "input_device_index": None,
@@ -604,14 +599,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "screenshot_cache_max_age_seconds": 86_400,
     "profile_path": "~/.config/omarchy/omarvis/profile.md",
     "ui": {
-        "earcons": True,
         "hud_position": "top-center",
     },
     "dictation": {
         "language": "",
         "cleanup": True,
         "model_id": "scribe_v2",
-        "chunk_size": 500,
     },
 }
 CONFIG_DIR = Path.home() / ".config" / "omarchy" / "omarvis"
@@ -652,11 +645,6 @@ def load_api_key(path: Path = API_KEY_PATH) -> str:
     if value:
         return value
     return path.read_text().strip() if path.exists() else ""
-
-
-def earcons_enabled(config: Mapping[str, Any]) -> bool:
-    ui = config.get("ui", {})
-    return bool(ui.get("earcons", True)) if isinstance(ui, Mapping) else True
 
 
 def sweep_screenshot_cache(
@@ -836,6 +824,16 @@ def _metered_audio_interface(
             self._teardown_thread = threading.Thread(target=teardown, daemon=True)
             self._teardown_thread.start()
 
+        # Called at session end so PortAudio's streams are actually closed
+        # before the process exits; without it the input-callback thread can
+        # still be calling into Python while the interpreter finalizes,
+        # which segfaults (observed as PyGILState_Ensure crashes in the
+        # PyAudio callback thread).
+        def join_teardown(self, timeout: float) -> None:
+            thread = self._teardown_thread
+            if thread is not None:
+                thread.join(timeout)
+
         def _output_thread(self) -> None:
             while not self.should_stop.is_set():
                 try:
@@ -922,14 +920,7 @@ def send_tool_result_then_screenshot(
             error_sink(str(error))
 
 
-def run_session(
-    config: Mapping[str, Any],
-    api_key: str,
-    *,
-    text_only: bool,
-    messages: Sequence[str],
-    mode: str = "agent",
-) -> int:
+def run_session(config: Mapping[str, Any], api_key: str) -> int:
     from elevenlabs import ElevenLabs
     from elevenlabs.conversational_ai.conversation import (
         ClientTools,
@@ -955,7 +946,7 @@ def run_session(
     )
 
     def emit_state(state: str) -> None:
-        emit_event({"event": "state", "state": state, "mode": mode})
+        emit_event({"event": "state", "state": state})
 
     def request_stop(_signum: int, _frame: Any) -> None:
         stop_requested.set()
@@ -990,7 +981,6 @@ def run_session(
         context_sink=contextual_updates.put,
         event_sink=on_tool_event,
         state_provider=desktop_state,
-        scope=mode,
         screenshot_sender=upload_screenshot,
     )
 
@@ -1050,20 +1040,14 @@ def run_session(
         else:
             emit_state("speaking")
         emit_event({"event": "agent", "text": text})
-        if text_only:
-            session_ended.set()
 
     def on_end(*_args: Any) -> None:
         session_ended.set()
 
-    audio_interface = (
-        None
-        if text_only
-        else _metered_audio_interface(config.get("input_device_index"), levels)
-    )
+    audio_interface = _metered_audio_interface(config.get("input_device_index"), levels)
     conversation = Conversation(
         client=client,
-        agent_id=str(config["ask_agent_id"] if mode == "ask" else config["agent_id"]),
+        agent_id=str(config["agent_id"]),
         requires_auth=True,
         audio_interface=audio_interface,
         config=ConversationInitiationData(dynamic_variables=variables),
@@ -1081,8 +1065,6 @@ def run_session(
     watcher = None
     try:
         wait_for_conversation_connection(conversation, stop_requested)
-        if not text_only:
-            play_sound("mic-open", enabled=earcons_enabled(config))
         if config.get("herdr_announcements", True) and not stop_requested.is_set():
             watcher = threading.Thread(
                 target=watch_herdr,
@@ -1091,9 +1073,6 @@ def run_session(
             )
             watcher.start()
         emit_state("listening")
-        for message in messages:
-            on_user(message)
-            conversation.send_user_message(message)
         while not stop_requested.is_set() and not session_ended.is_set():
             # Watchdog: don't depend solely on callback_end_session — if the
             # SDK's session thread died or it decided to stop without the
@@ -1119,8 +1098,9 @@ def run_session(
         teardown.join(5.0)
         if watcher is not None:
             watcher.join(5.0)
-        if not text_only:
-            play_sound("mic-close", enabled=earcons_enabled(config))
+        join_audio = getattr(audio_interface, "join_teardown", None)
+        if join_audio is not None:
+            join_audio(3.0)
         levels.force_zero()
         emit_state("idle")
         handler.clear_session_approvals()
@@ -1131,9 +1111,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run one Omarvis voice session")
     parser.add_argument("--list-devices", action="store_true")
     parser.add_argument("--simulate", action="store_true")
-    parser.add_argument("--text-only", action="store_true")
-    parser.add_argument("--message", action="append", default=[])
-    parser.add_argument("--mode", choices=("agent", "ask"), default="agent")
     arguments = parser.parse_args(argv)
     if arguments.list_devices:
         return list_devices()
@@ -1150,20 +1127,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config = load_config()
         sweep_screenshot_cache(config)
-        agent_key = "ask_agent_id" if arguments.mode == "ask" else "agent_id"
-        if not config.get(agent_key):
-            message = (
-                "Omarvis is not provisioned. Run bin/omarvis-setup."
-                if arguments.mode == "agent"
-                else "Omarvis ask mode is not provisioned. Run bin/omarvis-setup."
-            )
+        if not config.get("agent_id"):
             emit_event(
                 {
                     "event": "error",
-                    "message": message,
+                    "message": "Omarvis is not provisioned. Run bin/omarvis-setup.",
                 }
             )
-            play_sound("error", enabled=earcons_enabled(config))
             return 2
         api_key = load_api_key()
         if not api_key:
@@ -1173,20 +1143,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "message": "ELEVENLABS_API_KEY is missing. Run bin/omarvis-setup.",
                 }
             )
-            play_sound("error", enabled=earcons_enabled(config))
             return 2
-        return run_session(
-            config,
-            api_key,
-            text_only=arguments.text_only,
-            messages=arguments.message,
-            mode=arguments.mode,
-        )
+        return run_session(config, api_key)
     except Exception as error:  # noqa: BLE001 - keep the CLI failure machine-readable
         emit_event({"event": "error", "message": str(error)})
-        play_sound("error", enabled=earcons_enabled(config))
         return 1
 
 
+def _exit_now(code: int) -> None:
+    """Exit without interpreter finalization.
+
+    PortAudio's input-callback thread and the SDK's websocket thread are
+    daemon threads that may still be executing Python when main() returns.
+    CPython finalization frees the interpreter state underneath them and the
+    next callback segfaults (SIGSEGV in PyGILState_Ensure on the PyAudio
+    callback thread — the recurring "Process crashed: python 3.14"). The
+    joined teardown above closes the streams in the healthy case; skipping
+    finalization makes even the unhealthy case a clean exit.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    _exit_now(main())

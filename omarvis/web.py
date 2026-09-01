@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import hmac
 import json
-import mimetypes
 import os
 import queue
 import secrets
@@ -46,6 +45,15 @@ VENDOR_ASSET = (
     / "elevenlabs-client-1.23.0.iife.js"
 )
 VENDOR_ROUTE = "/vendor/elevenlabs-client-1.23.0.iife.js"
+FONT_DIR = Path(__file__).resolve().parent.parent / "assets" / "web" / "fonts"
+# The phone is not an Omarchy machine, so the Nerd Font the state glyphs are
+# drawn from has to travel with the page. Both faces are subsets of the
+# system JetBrainsMono Nerd Font holding only this page's vocabulary.
+FONT_ROUTE_PREFIX = "/fonts/"
+FONT_FILES = (
+    "jetbrains-mono-nf-regular.woff2",
+    "jetbrains-mono-nf-bold.woff2",
+)
 
 
 def emit_json(payload: Mapping[str, Any]) -> None:
@@ -353,7 +361,6 @@ class RemoteApplication:
             context_sink=context_sink,
             event_sink=event_sink,
             state_provider=desktop_state,
-            scope="agent",
             screenshot_sender=screenshot_sender,
         )
 
@@ -487,10 +494,12 @@ class ThemeAssets:
         theme_dir: Path = THEME_DIR,
         index_path: Path = WEB_ASSET,
         vendor_path: Path = VENDOR_ASSET,
+        font_dir: Path = FONT_DIR,
     ) -> None:
         self.theme_dir = theme_dir
         self.index_path = index_path
         self.vendor_path = vendor_path
+        self.font_dir = font_dir
         self._signature: tuple[int, ...] | None = None
         self._html = b""
 
@@ -514,6 +523,21 @@ class ThemeAssets:
                 return str(candidate[key])
         return str(colors.get(text) or fallback)
 
+    @classmethod
+    def _first(
+        cls,
+        shell: Mapping[str, Any],
+        colors: Mapping[str, Any],
+        candidates: Sequence[Any],
+        fallback: str,
+    ) -> str:
+        """Resolve the first theme reference that actually exists."""
+        for candidate in candidates:
+            resolved = cls._color(shell, colors, candidate, "")
+            if resolved:
+                return resolved
+        return fallback
+
     def html(self) -> bytes:
         shell_path = self.theme_dir / "shell.toml"
         colors_path = self.theme_dir / "colors.toml"
@@ -525,12 +549,29 @@ class ThemeAssets:
         colors = self._load_toml(colors_path)
         popups = shell.get("popups", {}) if isinstance(shell.get("popups"), Mapping) else {}
         bar = shell.get("bar", {}) if isinstance(shell.get("bar"), Mapping) else {}
+        polkit = shell.get("polkit", {}) if isinstance(shell.get("polkit"), Mapping) else {}
+        # Same token split the QML surfaces use: the page ground is the theme
+        # background, the card is the popups surface, accent is the theme
+        # accent, and bar.active stays the separate hot-microphone color.
         values = {
-            "background": self._color(shell, colors, popups.get("background"), "#111827"),
-            "foreground": self._color(shell, colors, popups.get("text"), "#f8fafc"),
-            "accent": self._color(shell, colors, bar.get("active"), "#7dd3fc"),
-            "urgent": self._color(shell, colors, popups.get("critical"), "#fb7185"),
-            "border": self._color(shell, colors, popups.get("border"), "#334155"),
+            "background": self._first(shell, colors, ("background",), "#111827"),
+            "surface": self._first(
+                shell, colors, (popups.get("background"), "background"), "#111827"
+            ),
+            "foreground": self._first(shell, colors, ("foreground",), "#f8fafc"),
+            "text": self._first(
+                shell, colors, (popups.get("text"), "foreground"), "#f8fafc"
+            ),
+            "accent": self._first(shell, colors, ("accent",), "#7dd3fc"),
+            "active": self._first(
+                shell, colors, (bar.get("active"), "accent"), "#7dd3fc"
+            ),
+            "urgent": self._first(
+                shell, colors, (polkit.get("text-error"), "red"), "#fb7185"
+            ),
+            "border": self._first(
+                shell, colors, (popups.get("border"), "accent"), "#334155"
+            ),
         }
         template = self.index_path.read_text(encoding="utf-8")
         css = ":root{" + "".join(f"--omarvis-{key}:{value};" for key, value in values.items()) + "}"
@@ -538,16 +579,16 @@ class ThemeAssets:
         self._signature = signature
         return self._html
 
-    def background(self) -> tuple[Path, str, str, str] | None:
-        path = self.theme_dir.parent / "background"
+    def font(self, name: str) -> tuple[Path, str, str, str] | None:
+        if name not in FONT_FILES:
+            return None
+        path = self.font_dir / name
         if not path.exists():
             return None
-        resolved = path.resolve()
-        stat = resolved.stat()
+        stat = path.stat()
         etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
         modified = formatdate(stat.st_mtime, usegmt=True)
-        content_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
-        return resolved, etag, modified, content_type
+        return path, etag, modified, "font/woff2"
 
     def vendor(self) -> tuple[Path, str, str, str] | None:
         if not self.vendor_path.exists():
@@ -730,7 +771,7 @@ def make_handler(app: RemoteApplication, assets: ThemeAssets) -> type[BaseHTTPRe
                 self.close_connection = True
                 return
             if path == "/":
-                body = assets.html().replace(b"OMARVIS_BACKGROUND_KEY", app.secret.encode())
+                body = assets.html().replace(b"OMARVIS_PAIRING_KEY", app.secret.encode())
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -742,8 +783,11 @@ def make_handler(app: RemoteApplication, assets: ThemeAssets) -> type[BaseHTTPRe
                 self.wfile.flush()
                 self.close_connection = True
                 return
-            if path == "/background":
-                self._file(assets.background(), cache_control="private, max-age=60")
+            if path.startswith(FONT_ROUTE_PREFIX):
+                self._file(
+                    assets.font(path[len(FONT_ROUTE_PREFIX) :]),
+                    cache_control="private, max-age=31536000, immutable",
+                )
                 return
             if path == VENDOR_ROUTE:
                 self._file(assets.vendor(), cache_control="private, max-age=31536000, immutable")

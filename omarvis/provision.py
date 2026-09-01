@@ -10,11 +10,11 @@ from typing import Any
 from .daemon import CONFIG_PATH, DEFAULT_CONFIG, load_api_key, load_config
 
 PROMPT_PATH = Path(__file__).parent.parent / "agent" / "prompt.md"
-ASK_PROMPT_PATH = Path(__file__).parent.parent / "agent" / "prompt-ask.md"
 DYNAMIC_VARIABLES = (
     "command_catalog",
     "hyprland_dispatchers",
     "herdr_catalog",
+    "herdr_skill",
     "browser_catalog",
     "current_state",
     "profile",
@@ -50,6 +50,11 @@ def conversation_payload(
             "prompt": {
                 "prompt": prompt,
                 "llm": llm,
+                # Pinned explicitly: a stored value from a previous model can
+                # be invalid for the new one (gemini's "minimal" broke the
+                # switch to gpt-5.6-terra). "low" is the latency-right choice
+                # for a realtime voice agent and widely supported.
+                "reasoning_effort": "low",
                 "tools": [
                     {
                         "type": "system",
@@ -95,8 +100,8 @@ def save_config(config: dict[str, Any], path: Path = CONFIG_PATH) -> None:
 
 
 def manual_steps() -> str:
-    return """Create two ElevenLabs Agents in the dashboard with these settings:
-- System prompts: paste agent/prompt.md for Omarvis and agent/prompt-ask.md for Omarvis Ask.
+    return """Create one ElevenLabs Agent in the dashboard with these settings:
+- System prompt: paste agent/prompt.md.
 - LLM: GPT-5.6 Sol (`gpt-5.6-sol`).
 - First message: empty. Language: English.
 - Voice ID: `JSWO6cw2AyFE324d5kEr`.
@@ -105,8 +110,8 @@ def manual_steps() -> str:
 - Enable the `end_call` system tool.
 - Add a Client tool named `run` with Wait for response enabled and a 35-second response timeout.
 - `run` parameters: required string `command`; optional booleans `confirmed` and `approve_category`.
-- Declare command_catalog, hyprland_dispatchers, herdr_catalog, browser_catalog, current_state, and profile as dynamic variables.
-Store both IDs as agent_id and ask_agent_id in ~/.config/omarchy/omarvis/config.json."""
+- Declare command_catalog, hyprland_dispatchers, herdr_catalog, herdr_skill, browser_catalog, current_state, and profile as dynamic variables.
+Store the ID as agent_id in ~/.config/omarchy/omarvis/config.json."""
 
 
 def _upsert_agent(
@@ -152,19 +157,6 @@ def provision(config: dict[str, Any], api_key: str) -> str:
     )
     config["agent_id"] = agent_id
     save_config(config)
-
-    ask_config = ConversationalConfig.model_validate(
-        conversation_payload(
-            ASK_PROMPT_PATH.read_text(), str(config["llm"]), voice_id
-        )
-    )
-    config["ask_agent_id"] = _upsert_agent(
-        client,
-        agent_id=str(config.get("ask_agent_id") or ""),
-        name="Omarvis Ask",
-        conversation_config=ask_config,
-    )
-    save_config(config)
     return agent_id
 
 
@@ -193,7 +185,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Provisioning failed: {error}\n\n{manual_steps()}", file=sys.stderr)
         return 1
     print(f"Omarvis agent ready: {agent_id}")
-    print(f"Omarvis ask agent ready: {config['ask_agent_id']}")
     return 0
 
 

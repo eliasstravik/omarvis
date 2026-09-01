@@ -6,8 +6,8 @@ from typing import Any
 
 
 BASE_TIMELINE: list[tuple[float, dict[str, Any]]] = [
-    (0.0, {"event": "state", "state": "starting", "mode": "agent"}),
-    (1.0, {"event": "state", "state": "listening", "mode": "agent"}),
+    (0.0, {"event": "state", "state": "starting"}),
+    (1.0, {"event": "state", "state": "listening"}),
     (0.25, {"event": "level", "in": 0.0, "out": 0.0}),
     (0.25, {"event": "level", "in": 0.2, "out": 0.0}),
     (0.25, {"event": "level", "in": 0.5, "out": 0.0}),
@@ -16,8 +16,8 @@ BASE_TIMELINE: list[tuple[float, dict[str, Any]]] = [
     (0.25, {"event": "level", "in": 0.2, "out": 0.0}),
     (0.25, {"event": "level", "in": 0.0, "out": 0.0}),
     (0.5, {"event": "user", "text": "Show me the current workspace"}),
-    (0.0, {"event": "state", "state": "thinking", "mode": "agent"}),
-    (1.75, {"event": "state", "state": "speaking", "mode": "agent"}),
+    (0.0, {"event": "state", "state": "thinking"}),
+    (1.75, {"event": "state", "state": "speaking"}),
     (0.0, {"event": "agent_part", "text": "You are ", "type": "delta"}),
     (0.4, {"event": "agent_part", "text": "on workspace 3.", "type": "delta"}),
     (0.25, {"event": "level", "in": 0.0, "out": 0.15}),
@@ -29,13 +29,13 @@ BASE_TIMELINE: list[tuple[float, dict[str, Any]]] = [
     (2.0, {"event": "ran", "command": "omarchy-workspace-switch 3"}),
     (0.5, {"event": "agent", "text": "You are on workspace 3."}),
     (0.75, {"event": "user", "text": "Dictate a short note"}),
-    (0.0, {"event": "state", "state": "thinking", "mode": "agent"}),
-    (1.5, {"event": "state", "state": "speaking", "mode": "agent"}),
+    (0.0, {"event": "state", "state": "thinking"}),
+    (1.5, {"event": "state", "state": "speaking"}),
     (0.0, {"event": "agent_part", "text": "Ready.", "type": "delta"}),
     (0.5, {"event": "level", "in": 0.0, "out": 0.6}),
     (0.5, {"event": "level", "in": 0.0, "out": 0.0}),
     (0.5, {"event": "agent", "text": "Ready."}),
-    (0.5, {"event": "state", "state": "idle", "mode": "agent"}),
+    (0.5, {"event": "state", "state": "idle"}),
     (0.5, {"event": "dictation", "state": "recording", "level": 0.15}),
     (0.25, {"event": "dictation", "state": "recording", "level": 0.7}),
     (0.25, {"event": "dictation", "state": "recording", "level": 0.0}),
@@ -49,13 +49,13 @@ def timeline(*, include_error: bool = False) -> list[tuple[float, dict[str, Any]
     if include_error:
         events.extend(
             [
-                (0.5, {"event": "state", "state": "starting", "mode": "agent"}),
+                (0.5, {"event": "state", "state": "starting"}),
                 (0.75, {"event": "error", "message": "Simulated microphone failure"}),
-                (2.0, {"event": "state", "state": "idle", "mode": "agent"}),
+                (2.0, {"event": "state", "state": "idle"}),
             ]
         )
     elif events[-1][1].get("event") != "state":
-        events.append((0.5, {"event": "state", "state": "idle", "mode": "agent"}))
+        events.append((0.5, {"event": "state", "state": "idle"}))
     return events
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import signal
 import subprocess
@@ -10,9 +11,8 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from .daemon import earcons_enabled, load_api_key, load_config
+from .daemon import load_api_key, load_config
 from .levels import LevelThrottle, rms_level
-from .sounds import play as play_sound
 
 SAMPLE_RATE = 16_000
 CHANNELS = 1
@@ -20,33 +20,71 @@ FRAMES_PER_BUFFER = 1024
 
 
 def clean_transcript(text: str, *, cleanup: bool) -> str:
-    """Prepare Scribe text for direct typing without ever adding Enter."""
+    """Prepare Scribe text for insertion without ever adding Enter."""
     without_trailing_newline = text.rstrip("\r\n")
     if not cleanup:
         return without_trailing_newline
     return re.sub(r"\s+", " ", without_trailing_newline).strip()
 
 
-def text_chunks(text: str, *, chunk_size: int = 500) -> list[str]:
-    if chunk_size < 1:
-        raise ValueError("dictation chunk_size must be positive")
-    return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)]
+# Terminals take CTRL+SHIFT+V; everything else pastes with CTRL+V. Hyprland
+# window classes, lowercased.
+TERMINAL_CLASSES = {
+    "alacritty",
+    "kitty",
+    "foot",
+    "footclient",
+    "ghostty",
+    "com.mitchellh.ghostty",
+    "wezterm",
+    "org.wezfurlong.wezterm",
+    "xterm",
+    "st",
+}
+
+
+def active_window_is_terminal(runner: Callable[..., Any] = subprocess.run) -> bool:
+    try:
+        result = runner(
+            ["hyprctl", "activewindow", "-j"],
+            check=True,
+            timeout=2,
+            capture_output=True,
+        )
+        window = json.loads(result.stdout)
+        return str(window.get("class", "")).lower() in TERMINAL_CLASSES
+    except Exception:
+        return False
 
 
 def inject_text(
     text: str,
     *,
-    chunk_size: int = 500,
     runner: Callable[..., Any] = subprocess.run,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> None:
-    for chunk in text_chunks(text, chunk_size=chunk_size):
-        runner(
-            ["wtype", "--", chunk],
-            check=True,
-            timeout=10,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+    """Paste the transcript in one shot instead of typing it out.
+
+    The transcript is already on the clipboard by the time the injector
+    runs, so injection is a single paste chord and the text appears at once,
+    exactly like a normal paste.
+    """
+    if not text:
+        return
+    # Give wl-copy a beat to take clipboard ownership before the paste lands.
+    sleeper(0.1)
+    if active_window_is_terminal(runner):
+        argv = ["wtype", "-M", "ctrl", "-M", "shift", "-P", "v", "-p", "v",
+                "-m", "shift", "-m", "ctrl"]
+    else:
+        argv = ["wtype", "-M", "ctrl", "-P", "v", "-p", "v", "-m", "ctrl"]
+    runner(
+        argv,
+        check=True,
+        timeout=10,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def copy_to_clipboard(
@@ -180,8 +218,6 @@ class DictationService:
         injector: Callable[[str], None],
         cleanup: bool = True,
         event_sink: Callable[[Mapping[str, Any]], None] | None = None,
-        earcons_enabled: bool = False,
-        sound_player: Callable[..., None] = play_sound,
         tap_discard_seconds: float = 1.0,
         max_recording_seconds: float = 90.0,
         clock: Callable[[], float] = time.monotonic,
@@ -191,8 +227,6 @@ class DictationService:
         self.injector = injector
         self.cleanup = cleanup
         self.event_sink = event_sink
-        self.earcons_enabled = earcons_enabled
-        self.sound_player = sound_player
         # A stop arriving within tap_discard_seconds of start is a tap on
         # the push-to-talk key, not a release after speech: discard the
         # recording quietly instead of transcribing a fraction of a second
@@ -220,9 +254,6 @@ class DictationService:
         if self.event_sink is not None:
             self.event_sink({"event": "dictation", "state": state, **extra})
 
-    def _play(self, name: str) -> None:
-        self.sound_player(name, enabled=self.earcons_enabled)
-
     def start(self) -> str:
         with self._lock:
             if self.state != "idle":
@@ -233,13 +264,11 @@ class DictationService:
                 self.recorder.start()
             except Exception as error:
                 self._emit("error", message=str(error))
-                self._play("error")
                 self._emit("idle")
                 return "error"
             self.locked = False
             self._recording_started_at = self.clock()
             self._start_cap_timer()
-            self._play("mic-open")
             self._emit("recording")
             return "recording"
 
@@ -275,10 +304,8 @@ class DictationService:
                 audio = self.recorder.stop()
             except Exception as error:
                 self._emit("error", message=str(error))
-                self._play("error")
                 self._emit("idle")
                 return "error"
-            self._play("mic-close")
             self._emit("transcribing")
             self._worker = threading.Thread(
                 target=self._finish, args=(audio,), daemon=True
@@ -311,10 +338,8 @@ class DictationService:
             self.recorder.stop()
         except Exception as error:
             self._emit("error", message=str(error))
-            self._play("error")
             self._emit("idle")
             return "error"
-        self._play("mic-close")
         self._emit("idle", canceled=True)
         return "canceled"
 
@@ -333,8 +358,6 @@ class DictationService:
             except Exception as error:
                 with self._lock:
                     self._emit("error", message=str(error), text=transcript)
-                self._play("error")
-                with self._lock:
                     self._emit("idle")
                 return
             with self._lock:
@@ -342,11 +365,14 @@ class DictationService:
         except Exception as error:
             with self._lock:
                 self._emit("error", message=str(error))
-                self._play("error")
                 self._emit("idle")
 
     def wait(self, timeout: float = 10.0) -> None:
-        worker = self._worker
+        # Read the worker under the lock: stop() creates and starts it while
+        # holding self._lock (possibly from the cap-timer thread), and
+        # joining a created-but-not-yet-started thread raises.
+        with self._lock:
+            worker = self._worker
         if worker is not None:
             worker.join(timeout)
 
@@ -355,7 +381,6 @@ class DictationService:
             self._cancel_cap_timer()
             if self.state == "recording":
                 self.recorder.stop()
-                self._play("mic-close")
             self._emit("idle")
 
 
@@ -374,14 +399,12 @@ def main(_argv: Sequence[str] | None = None) -> int:
         )
 
     transcriber = scribe_transcriber(api_key, dictation) if api_key else missing_key
-    chunk_size = int(dictation.get("chunk_size", 500))
     service = DictationService(
         recorder=AudioRecorder(config.get("input_device_index")),
         transcriber=transcriber,
-        injector=lambda text: inject_text(text, chunk_size=chunk_size),
+        injector=inject_text,
         cleanup=bool(dictation.get("cleanup", True)),
         event_sink=emit_event,
-        earcons_enabled=earcons_enabled(config),
         tap_discard_seconds=float(dictation.get("tap_discard_ms", 1000)) / 1000.0,
         max_recording_seconds=float(dictation.get("max_recording_seconds", 90)),
     )
@@ -419,4 +442,10 @@ def main(_argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Same shutdown discipline as omarvis.daemon: close() stops the PyAudio
+    # stream, then exit without interpreter finalization so a straggling
+    # PortAudio callback thread can never segfault a dying interpreter.
+    code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
