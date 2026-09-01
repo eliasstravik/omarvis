@@ -1,0 +1,621 @@
+from __future__ import annotations
+
+import http.client
+import hashlib
+import json
+import re
+import stat
+import threading
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+
+from omarvis.web import (
+    BIND_FAILURE_EXIT,
+    FONT_DIR,
+    FONT_FILES,
+    CommandResult,
+    RemoteApplication,
+    TailnetController,
+    ThemeAssets,
+    _route_path,
+    make_handler,
+    main,
+    parse_tailscale_status,
+    remove_mount,
+    stable_secret,
+)
+
+
+def test_stable_secret_is_reused_and_private(tmp_path: Path) -> None:
+    path = tmp_path / "state" / "web-secret"
+    first = stable_secret(path)
+    second = stable_secret(path)
+
+    assert first == second
+    assert len(first) >= 32
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("message", ["no such mount", "handler does not exist"])
+def test_remove_mount_uses_pinned_command_and_accepts_missing_mount(message) -> None:
+    calls = []
+
+    def runner(argv):
+        calls.append(tuple(argv))
+        return CommandResult(1, stderr=message)
+
+    assert remove_mount(runner).returncode == 0
+    assert calls == [("tailscale", "serve", "--set-path", "/omarvis", "off")]
+
+
+@pytest.mark.parametrize(
+    ("serve_result", "expected_state"),
+    [
+        (CommandResult(1, stderr="permission denied: set an operator"), "needs-operator"),
+        (CommandResult(1, stderr="backend rejected the mount"), "serve-failed"),
+        (CommandResult(0), "serving"),
+    ],
+)
+def test_tailnet_mount_state_machine_preserves_verbatim_failure(
+    serve_result: CommandResult, expected_state: str
+) -> None:
+    calls = []
+    status = json.dumps(
+        {
+            "BackendState": "Running",
+            "Self": {"DNSName": "desk.example.ts.net.", "UserID": 42},
+            "User": {"42": {"LoginName": "person@example.com"}},
+        }
+    )
+
+    def runner(argv):
+        calls.append(tuple(argv))
+        if tuple(argv) == ("tailscale", "status", "--json"):
+            return CommandResult(0, stdout=status)
+        return serve_result
+
+    controller = TailnetController(4763, runner=runner)
+    state, error = controller.mount()
+
+    assert state == expected_state
+    assert error == ("" if serve_result.returncode == 0 else serve_result.stderr)
+    assert calls[-1] == (
+        "tailscale",
+        "serve",
+        "--bg",
+        "--set-path",
+        "/omarvis",
+        "http://127.0.0.1:4763",
+    )
+
+
+def test_tailnet_mount_requires_a_running_tailnet() -> None:
+    controller = TailnetController(
+        4763,
+        runner=lambda _argv: CommandResult(0, stdout='{"BackendState":"Stopped"}'),
+    )
+
+    assert controller.mount() == ("needs-tailscale", "Tailscale is not connected")
+
+
+def test_bind_failure_has_a_distinct_process_exit_code(monkeypatch, capsys) -> None:
+    unmounts = []
+
+    class Controller:
+        def unmount(self):
+            unmounts.append(True)
+            return CommandResult(0)
+
+    monkeypatch.setattr("omarvis.web.load_config", lambda: {})
+    monkeypatch.setattr("omarvis.web.load_api_key", lambda: "")
+    monkeypatch.setattr("omarvis.web.stable_secret", lambda: "secret")
+    monkeypatch.setattr("omarvis.web.TailnetController", lambda *_args, **_kwargs: Controller())
+    monkeypatch.setattr("omarvis.web.RemoteApplication", lambda *_args, **_kwargs: object())
+
+    def fail_bind(*_args, **_kwargs):
+        raise OSError("address already in use")
+
+    monkeypatch.setattr("omarvis.web.ThreadingHTTPServer", fail_bind)
+
+    assert main(["--port", "4763"]) == BIND_FAILURE_EXIT
+    assert unmounts == [True]
+    assert "Web bind failed: address already in use" in capsys.readouterr().out
+
+
+def test_tailnet_identity_comes_from_self_user_id_and_tags_disable_login_check() -> None:
+    untagged = parse_tailscale_status(
+        json.dumps(
+            {
+                "BackendState": "Running",
+                "Self": {"DNSName": "desk.example.ts.net.", "UserID": 42},
+                "User": {"42": {"LoginName": "person@example.com"}},
+            }
+        )
+    )
+    tagged = parse_tailscale_status(
+        json.dumps(
+            {
+                "BackendState": "Running",
+                "Self": {"DNSName": "desk.example.ts.net.", "UserID": 42, "Tags": ["tag:server"]},
+                "User": {"42": {"LoginName": "person@example.com"}},
+            }
+        )
+    )
+
+    assert untagged.login_name == "person@example.com"
+    assert untagged.dns_name == "desk.example.ts.net"
+    assert not untagged.tagged
+    assert tagged.tagged
+
+
+def test_prefixed_and_bare_routes_are_equivalent() -> None:
+    assert _route_path("/api/ping?k=one") == ("/api/ping", {"k": ["one"]})
+    assert _route_path("/omarvis/api/ping?k=one") == ("/api/ping", {"k": ["one"]})
+    assert _route_path("/omarvis/?k=one") == ("/", {"k": ["one"]})
+
+
+def _simulate_app(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("omarvis.web.catalog_variables", lambda **_kwargs: {"machine": "test"})
+    monkeypatch.setattr("omarvis.web.load_catalog", lambda: {})
+    events = []
+    holder = {}
+
+    def sink(event):
+        events.append(dict(event))
+        if event.get("action") == "end-local":
+            holder["app"].ack_local_ended()
+
+    controller = TailnetController(0, simulate=True)
+    app = RemoteApplication(
+        {"agent_id": "agent"},
+        "",
+        secret="pairing-secret",
+        controller=controller,
+        simulate=True,
+        command_sink=sink,
+        token_minter=lambda: ("simulate-token", "simulate-conversation", object()),
+    )
+    holder["app"] = app
+    return app, events
+
+
+def test_token_mint_registers_fresh_bound_session_without_start_grace(monkeypatch) -> None:
+    app, events = _simulate_app(monkeypatch)
+    try:
+        assert app.session() is None
+        first = app.mint_token()
+        first_handler = app.session().handler
+        first_handler._approved_categories.add("software")
+        second = app.mint_token()
+
+        assert first == {
+            "token": "simulate-token",
+            "conversation_id": "simulate-conversation",
+            "dynamic_variables": {"machine": "test"},
+            "local_ended": True,
+        }
+        assert second["local_ended"] is True
+        assert app.session().conversation_id == "simulate-conversation"
+        assert app.session().handler is not first_handler
+        assert first_handler._approved_categories == set()
+        assert [event for event in events if event.get("event") == "phone"][-2:] == [
+            {"event": "phone", "active": False, "reason": "takeover"},
+            {"event": "phone", "active": True},
+        ]
+    finally:
+        app.stop()
+
+
+def test_session_cap_and_ping_lifeline_are_authoritative(monkeypatch) -> None:
+    app, _events = _simulate_app(monkeypatch)
+    now = [0.0]
+    app.clock = lambda: now[0]
+    stream = app.broker.subscribe()
+    try:
+        app.mint_token()
+        assert stream.get(timeout=0.1)["event"] == "context"
+        now[0] = 14.0
+        assert app.ping()
+        now[0] = 28.0
+        assert app.session() is not None
+        now[0] = 30.0
+        assert app.session() is None
+        assert stream.get(timeout=0.1) == {"event": "ended", "reason": "expired"}
+
+        now[0] = 100.0
+        app.mint_token()
+        now[0] = 401.0
+        assert app.session() is None
+    finally:
+        app.broker.unsubscribe(stream)
+        app.stop()
+
+
+def test_token_reports_local_end_timeout_without_minting(monkeypatch) -> None:
+    monkeypatch.setattr("omarvis.web.LOCAL_END_WAIT_SECONDS", 0.01)
+    minted = []
+    app = RemoteApplication(
+        {"agent_id": "agent"},
+        "",
+        secret="pairing-secret",
+        controller=TailnetController(0, simulate=True),
+        command_sink=lambda _event: None,
+        token_minter=lambda: minted.append(True),
+    )
+    try:
+        assert app.mint_token() == {
+            "token": "",
+            "dynamic_variables": {},
+            "local_ended": False,
+        }
+        assert minted == []
+        assert app.session() is None
+    finally:
+        app.stop()
+
+
+def test_remote_see_emits_file_only_after_handler_result(monkeypatch) -> None:
+    app, _events = _simulate_app(monkeypatch)
+    stream = app.broker.subscribe()
+    try:
+        app.mint_token()
+        session = app.session()
+        assert stream.get(timeout=0.1)["event"] == "context"
+        session.handler.handle = lambda _parameters: {"status": "screenshot_uploaded"}
+        session.handler.take_pending_screenshot = lambda key: "file-123" if key == "remote" else None
+
+        result, file_id = app.run_tool({"command": "omarvis see"})
+
+        assert result == {"status": "screenshot_uploaded"}
+        assert file_id == "file-123"
+        assert stream.get(timeout=0.1) == {"event": "see-ready", "file_id": "file-123"}
+    finally:
+        app.broker.unsubscribe(stream)
+        app.stop()
+
+
+def test_session_binding_rejects_calls_after_event_stream_closes(monkeypatch) -> None:
+    app, _events = _simulate_app(monkeypatch)
+    try:
+        app.mint_token()
+        session = app.attach_stream()
+        assert session is not None
+        assert app.note_transcript("yes")
+        app.stream_closed(session)
+        assert app.session() is None
+        assert not app.note_transcript("no")
+    finally:
+        app.stop()
+
+
+def test_http_security_and_session_contract(monkeypatch, tmp_path: Path) -> None:
+    app, _events = _simulate_app(monkeypatch)
+    index = tmp_path / "index.html"
+    index.write_text("<style>/* OMARVIS_THEME */</style>ready", encoding="utf-8")
+    vendor = tmp_path / "client.js"
+    vendor.write_text("window.ElevenLabsClient = {};", encoding="utf-8")
+    assets = ThemeAssets(tmp_path / "theme", index, vendor)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app, assets))
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+
+    def request(method, path, *, body=None, headers=None):
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection.request(method, path, body=body, headers=headers or {})
+        response = connection.getresponse()
+        data = response.read()
+        returned = response.status, dict(response.getheaders()), data
+        connection.close()
+        return returned
+
+    post_headers = {
+        "Authorization": "Bearer pairing-secret",
+        "Content-Type": "application/json",
+        "Origin": "https://omarvis.test.ts.net",
+    }
+    try:
+        for path in (
+            "/?k=wrong",
+            "/fonts/jetbrains-mono-nf-regular.woff2?k=wrong",
+            "/api/events?k=wrong",
+            "/vendor/elevenlabs-client-1.23.0.iife.js?k=wrong",
+        ):
+            assert request("GET", path)[0] == 403
+        for path in ("/api/token", "/api/ping", "/api/transcript", "/api/run", "/api/session/end"):
+            assert request(
+                "POST",
+                path,
+                body="{}",
+                headers={**post_headers, "Authorization": "Bearer wrong"},
+            )[0] == 403
+        assert request("GET", "/?k=pairing-secret", headers={"Host": "evil.example"})[0] == 400
+        assert request(
+            "POST",
+            "/api/token",
+            body="{}",
+            headers={**post_headers, "Content-Type": "text/plain"},
+        )[0] == 415
+        app.expected_login = "person@example.com"
+        assert request("GET", "/?k=pairing-secret")[0] == 403
+        identity_headers = {"Tailscale-User-Login": "person@example.com"}
+        post_headers.update(identity_headers)
+        status, headers, body = request(
+            "GET", "/omarvis/?k=pairing-secret", headers=identity_headers
+        )
+        assert status == 200
+        assert b"ready" in body
+        assert "Access-Control-Allow-Origin" not in headers
+
+        status, headers, body = request(
+            "GET",
+            "/omarvis/vendor/elevenlabs-client-1.23.0.iife.js?k=pairing-secret",
+            headers=identity_headers,
+        )
+        assert status == 200
+        assert headers["Content-Type"] == "text/javascript; charset=utf-8"
+        assert headers["X-Content-Type-Options"] == "nosniff"
+        assert b"ElevenLabsClient" in body
+        etag = headers["ETag"]
+        assert request(
+            "GET",
+            "/vendor/elevenlabs-client-1.23.0.iife.js?k=pairing-secret",
+            headers={**identity_headers, "If-None-Match": etag},
+        )[0] == 304
+        assert request("GET", "/vendor/elevenlabs-client-1.23.0.iife.js?k=wrong")[0] == 403
+
+        # The phone is not an Omarchy machine, so the Nerd Font the state
+        # glyphs live in has to be served alongside the page.
+        status, headers, body = request(
+            "GET",
+            "/omarvis/fonts/jetbrains-mono-nf-regular.woff2?k=pairing-secret",
+            headers=identity_headers,
+        )
+        assert status == 200
+        assert headers["Content-Type"] == "font/woff2"
+        assert headers["Cache-Control"] == "private, max-age=31536000, immutable"
+        assert headers["X-Content-Type-Options"] == "nosniff"
+        assert body[:4] == b"wOF2"
+        assert request(
+            "GET",
+            "/fonts/jetbrains-mono-nf-regular.woff2?k=pairing-secret",
+            headers={**identity_headers, "If-None-Match": headers["ETag"]},
+        )[0] == 304
+        # Only the two shipped faces are reachable; the route is not a
+        # directory server.
+        assert request(
+            "GET", "/fonts/../web-secret?k=pairing-secret", headers=identity_headers
+        )[0] == 404
+        assert request(
+            "GET", "/background?k=pairing-secret", headers=identity_headers
+        )[0] == 404
+
+        assert request(
+            "POST", "/api/ping", body="{}", headers={**post_headers, "Origin": "https://evil.test"}
+        )[0] == 403
+        assert request("POST", "/api/ping", body="{}", headers=post_headers)[0] == 409
+        assert request("POST", "/api/run", body="{}", headers=post_headers)[0] == 409
+        status, _headers, body = request(
+            "POST", "/omarvis/api/token", body="{}", headers=post_headers
+        )
+        assert status == 200
+        assert json.loads(body)["local_ended"] is True
+        assert request(
+            "POST",
+            "/api/transcript",
+            body=json.dumps({"text": "hello", "final": False}),
+            headers=post_headers,
+        )[0] == 400
+        assert request(
+            "POST",
+            "/api/transcript",
+            body=json.dumps({"text": "hello", "final": True}),
+            headers=post_headers,
+        )[0] == 200
+    finally:
+        app.stop()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_theme_tokens_cover_every_surface_the_phone_page_paints(tmp_path: Path) -> None:
+    theme = tmp_path / "theme"
+    theme.mkdir()
+    (theme / "shell.toml").write_text(
+        "[bar]\nactive = \"#ff0055\"\n"
+        "[popups]\nbackground = \"#101010\"\ntext = \"#eeeeee\"\n"
+        "border = \"hyprland.active-border\"\n"
+        "[hyprland]\nactive-border = \"#123456\"\n"
+        "[polkit]\ntext-error = \"#ff2200\"\n",
+        encoding="utf-8",
+    )
+    (theme / "colors.toml").write_text(
+        "accent = '#00ffaa'\nbackground = '#050505'\nforeground = '#cccccc'\n",
+        encoding="utf-8",
+    )
+    index = tmp_path / "index.html"
+    index.write_text("<style>/* OMARVIS_THEME */</style>", encoding="utf-8")
+
+    html = ThemeAssets(theme, index).html().decode()
+
+    # The page ground is the theme background; the card is the popups
+    # surface; accent is the theme accent and bar.active stays the separate
+    # hot-microphone color, exactly as the QML surfaces split them.
+    assert "--omarvis-background:#050505" in html
+    assert "--omarvis-surface:#101010" in html
+    assert "--omarvis-foreground:#cccccc" in html
+    assert "--omarvis-text:#eeeeee" in html
+    assert "--omarvis-accent:#00ffaa" in html
+    assert "--omarvis-active:#ff0055" in html
+    assert "--omarvis-urgent:#ff2200" in html
+    # Indirections through shell sections still resolve.
+    assert "--omarvis-border:#123456" in html
+
+
+def test_theme_tokens_fall_back_without_a_theme(tmp_path: Path) -> None:
+    index = tmp_path / "index.html"
+    index.write_text("<style>/* OMARVIS_THEME */</style>", encoding="utf-8")
+
+    html = ThemeAssets(tmp_path / "missing", index).html().decode()
+
+    for token in (
+        "background",
+        "surface",
+        "foreground",
+        "text",
+        "accent",
+        "active",
+        "urgent",
+        "border",
+    ):
+        assert f"--omarvis-{token}:#" in html
+
+
+def test_every_theme_token_the_page_uses_is_substituted() -> None:
+    page = (Path(__file__).parents[1] / "assets" / "web" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    html = ThemeAssets().html().decode()
+
+    used = set(re.findall(r"var\(--omarvis-([a-z]+)\)", page))
+    defined = set(re.findall(r"--omarvis-([a-z]+):", html))
+
+    assert used
+    assert used <= defined
+
+
+def test_phone_page_contains_pinned_session_and_relay_contract() -> None:
+    page = (Path(__file__).parents[1] / "assets" / "web" / "index.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "elevenlabs-client-1.23.0.iife.js?k=OMARVIS_PAIRING_KEY" in page
+    assert 'await post("./api/token")' in page
+    assert "await openEvents()" in page
+    assert page.index("await openEvents()") < page.index("Conversation.startSession")
+    assert "dynamicVariables: token.dynamic_variables || {}" in page
+    assert "clientTools: {run: relayRun}" in page
+    assert "started.getId() !== expectedConversationId" in page
+    assert 'role === "user"' in page
+    assert "{text: message, final: true}" in page
+    assert 'post("./api/ping")' in page
+    assert "}, 5000);" in page
+    assert "sendContextualUpdate" in page
+    assert "sendMultimodalMessage" in page
+    assert page.index("return JSON.stringify(result)") < page.index("setTimeout(flushSeeReady, 0)")
+    assert "env(safe-area-inset-bottom)" in page
+    assert "@media (prefers-reduced-motion: reduce)" in page
+    assert "@media (max-width: 360px)" in page
+
+
+def test_phone_page_is_a_touchable_osd_not_a_glassy_card() -> None:
+    page = (Path(__file__).parents[1] / "assets" / "web" / "index.html").read_text(
+        encoding="utf-8"
+    )
+
+    # Omarchy surfaces are opaque, square and hairline-bordered. Nothing on
+    # this page may be rounded, blurred, shadowed, or laid over the wallpaper.
+    assert "backdrop-filter" not in page
+    assert "box-shadow" not in page
+    assert "./background" not in page
+    assert "OMARVIS_BACKGROUND_KEY" not in page
+    for radius in re.findall(r"border-radius:\s*([^;]+);", page):
+        assert radius.strip() in {"0"}, radius
+    assert not re.search(r"\btransform:\s*scale", page)
+
+    # One card, one state glyph, one flat 6px meter, one full-width action.
+    assert "border: 2px solid var(--omarvis-accent)" in page
+    assert "background: var(--omarvis-surface)" in page
+    assert "background: var(--omarvis-background)" in page
+    assert "height: 6px" in page
+    assert "color-mix(in srgb, var(--omarvis-text) 45%, transparent)" in page
+    assert "transition: width 140ms cubic-bezier(0.33, 1, 0.68, 1)" in page
+    assert "min-height: 72px" in page
+    assert "color: var(--omarvis-background)" in page
+    assert "background: var(--omarvis-accent)" in page
+    # Secondary states use the [controls] foreground-tint alphas.
+    assert "color-mix(in srgb, var(--omarvis-text) 8%, transparent)" in page
+    assert "color-mix(in srgb, var(--omarvis-text) 4%, transparent)" in page
+
+    # The 2x2 MIC/AGENT grid, the tailnet pill and the brand heading are gone.
+    assert "tailnet only" not in page
+    assert "<h1" not in page
+    assert 'class="dot"' not in page
+    assert ">MIC<" not in page
+    assert ">AGENT<" not in page
+
+
+def test_phone_page_ships_its_own_nerd_font_and_shares_the_hud_vocabulary() -> None:
+    page = (Path(__file__).parents[1] / "assets" / "web" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    hud = (Path(__file__).parents[1] / "HudWindow.qml").read_text(encoding="utf-8")
+
+    assert page.count("@font-face") == 2
+    assert 'font-family: "JetBrainsMono NF", monospace' in page
+    assert "./fonts/jetbrains-mono-nf-regular.woff2?k=OMARVIS_PAIRING_KEY" in page
+    assert "./fonts/jetbrains-mono-nf-bold.woff2?k=OMARVIS_PAIRING_KEY" in page
+    assert "font-display: swap" in page
+    for name in FONT_FILES:
+        font = FONT_DIR / name
+        assert font.exists()
+        assert font.read_bytes()[:4] == b"wOF2"
+
+    # Same four-glyph vocabulary as the desktop HUD: hourglass (waiting),
+    # microphone (your floor), speaker (agent's voice), wave (goodbye), plus
+    # the failure alert. Nothing else — no tool glyphs, no ✓, no thinking.
+    for codepoint in ("0xF036C", "0xF051F", "0xF057E", "0xF0026"):
+        assert codepoint in page
+        assert codepoint in hud
+    for retired in ("toolGlyphFor", '"✓"', "0xF0100", "0xF03D8", "0xF0425",
+                    "0xF05B7", "0xF01D8", "0xF0772"):
+        assert retired not in page
+    assert page.index("waiting: String.fromCodePoint(0xF051F)") > 0
+    # The header names the product, not the hostname.
+    assert '.textContent = "Omarvis"' in page
+    assert "animation: omarvis-pulse 1900ms ease-in-out infinite" in page
+    assert "@keyframes omarvis-pulse" in page
+    assert 'elements.talkLabel.textContent = sweeping ? "Connecting"' in page
+
+    # No visible prose on the page: status is screen-reader-only, and the
+    # explainer sentence is gone for good.
+    assert "Starting here ends" not in page
+    assert "<footer>" not in page
+    assert 'class="sr" id="status"' in page
+    # The microphone is requested once and kept muted between calls so the
+    # permission prompt cannot repeat within a page load.
+    assert "getUserMedia" in page
+    assert "function ensureMic" in page
+    assert "pagehide" in page
+
+
+def test_vendored_browser_sdk_matches_recorded_integrity() -> None:
+    bundle = (
+        Path(__file__).parents[1]
+        / "assets"
+        / "web"
+        / "vendor"
+        / "elevenlabs-client-1.23.0.iife.js"
+    ).read_bytes()
+
+    assert hashlib.sha256(bundle).hexdigest() == (
+        "b6adb12bd5df649af3ce3ac9205fd0e7d1c099513481c58bd1990f2d50903204"
+    )
+
+
+def test_phone_infers_thinking_from_the_final_user_transcript() -> None:
+    page = (
+        Path(__file__).parents[1] / "assets" / "web" / "index.html"
+    ).read_text(encoding="utf-8")
+
+    # The SDK emits no thinking event; the final user transcript is the
+    # thinking signal, cleared on any mode change and by a failsafe timer.
+    assert "if (!agentSpeaking) setPondering(true);" in page
+    assert "setPondering(false);" in page
+    assert "(runInFlight || pondering) && live" in page
+    assert "}, 12000);" in page

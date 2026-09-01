@@ -1,0 +1,453 @@
+#!/bin/bash
+
+# Omarvis installer. Every question is asked up front, then the work runs
+# unattended: one line per phase on the terminal, full subprocess output in
+# ~/.local/share/omarvis/setup.log. --yes answers every prompt with its
+# affirmative for unattended runs.
+
+set -euo pipefail
+
+PLUGIN_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+CONFIG_DIR="$HOME/.config/omarchy/omarvis"
+CONFIG_PATH="$CONFIG_DIR/config.json"
+KEY_PATH="$CONFIG_DIR/api_key"
+PROFILE_PATH="$CONFIG_DIR/profile.md"
+STATE_DIR="$HOME/.local/share/omarvis"
+VENV_DIR="$STATE_DIR/venv"
+LOG_PATH="$STATE_DIR/setup.log"
+BINDINGS_PATH="$HOME/.config/hypr/bindings.lua"
+AGENT_BINDING='o.bind("SUPER + CTRL + J", "Omarvis", "omarchy-shell omarvis toggle")'
+DICTATE_UNBIND='hl.unbind("SUPER + J")'
+DICTATE_START_BINDING='o.bind("SUPER + J", "Omarvis Dictate", "omarchy-shell omarvis dictate start")'
+DICTATE_STOP_BINDING='o.bind("SUPER + J", "Omarvis Dictate Stop", "omarchy-shell omarvis dictate stop", { release = true })'
+PANEL_BINDING='o.bind("SUPER + ALT + J", "Omarvis Panel", "omarchy-shell omarvis panel")'
+REMOTE_BINDING='o.bind("SUPER + SHIFT + J", "Omarvis Remote", "omarchy-shell omarvis toggleRemote")'
+
+ASSUME_YES=false
+for argument in "$@"; do
+  case $argument in
+    -y|--yes) ASSUME_YES=true ;;
+    -h|--help)
+      echo "Usage: omarvis-setup [--yes]"
+      echo "  --yes  answer every prompt with yes; requires ELEVENLABS_API_KEY"
+      echo "         in the environment when no key is stored yet"
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $argument (try --help)" >&2
+      exit 64
+      ;;
+  esac
+done
+
+# Styling only when stdout is an interactive terminal and NO_COLOR is unset.
+if [[ -t 1 && -z ${NO_COLOR:-} ]] && tput sgr0 >/dev/null 2>&1; then
+  BOLD=$(tput bold 2>/dev/null || true)
+  DIM=$(tput dim 2>/dev/null || true)
+  RED=$(tput setaf 1 2>/dev/null || true)
+  GREEN=$(tput setaf 2 2>/dev/null || true)
+  YELLOW=$(tput setaf 3 2>/dev/null || true)
+  RESET=$(tput sgr0 2>/dev/null || true)
+else
+  BOLD="" DIM="" RED="" GREEN="" YELLOW="" RESET=""
+fi
+OK="${GREEN}✓${RESET}"
+BAD="${RED}✗${RESET}"
+WARN="${YELLOW}!${RESET}"
+
+TOTAL_PHASES=6
+phase() { printf '\n%s[%s/%s]%s %s\n' "$BOLD" "$1" "$TOTAL_PHASES" "$RESET" "$2"; }
+note() { printf '  %s\n' "$1"; }
+rule() { printf '%s\n' "──────────────────────────────────────────────────────"; }
+
+die() {
+  printf '%s %s\n' "$BAD" "$1" >&2
+  exit 1
+}
+
+# Subprocess chatter goes to the log; the terminal keeps one line per step.
+# On failure the log tail comes back, so nothing is ever hidden.
+run_logged() {
+  local description=$1
+  shift
+  printf '  %s·%s %s\n' "$DIM" "$RESET" "$description"
+  if "$@" >>"$LOG_PATH" 2>&1; then
+    return 0
+  fi
+  local code=$?
+  printf '%s %s failed (exit %s). Last lines of %s:\n' "$BAD" "$description" "$code" "$LOG_PATH" >&2
+  tail -n 20 "$LOG_PATH" >&2
+  exit "$code"
+}
+
+confirm() {
+  local question=$1 default=${2:-n} suffix answer
+  if [[ $ASSUME_YES == true ]]; then return 0; fi
+  suffix='[y/N]'
+  [[ $default == y ]] && suffix='[Y/n]'
+  read -r -p "$question $suffix " answer
+  if [[ -z $answer ]]; then
+    [[ $default == y ]]
+    return
+  fi
+  [[ $answer == [yY] || $answer == [yY][eE][sS] ]]
+}
+
+# ---------------------------------------------------------------- Preflight
+
+printf '%sOmarvis setup%s\n' "$BOLD" "$RESET"
+mkdir -p "$STATE_DIR"
+printf '── omarvis-setup %s ──\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG_PATH"
+
+echo
+echo "Preflight:"
+MISSING_REQUIRED=false
+need_command() {
+  if command -v "$1" >/dev/null 2>&1; then
+    printf '  %s %s\n' "$OK" "$1"
+  else
+    printf '  %s %s (required, not found)\n' "$BAD" "$1"
+    MISSING_REQUIRED=true
+  fi
+}
+need_command omarchy
+need_command python
+need_command jq
+need_command wl-copy
+need_command curl
+if [[ $MISSING_REQUIRED == true ]]; then
+  die "Install the missing commands above, then run omarvis-setup again."
+fi
+
+HAVE_WTYPE=false
+command -v wtype >/dev/null 2>&1 && HAVE_WTYPE=true
+AGENT_BROWSER_PATH=$(command -v agent-browser || true)
+WILL_INSTALL_AGENT_BROWSER=false
+if [[ -z $AGENT_BROWSER_PATH ]] && command -v npm >/dev/null 2>&1; then
+  WILL_INSTALL_AGENT_BROWSER=true
+fi
+
+BROWSER_EXECUTABLE=""
+for browser in chromium google-chrome google-chrome-stable chrome; do
+  if command -v "$browser" >/dev/null 2>&1; then
+    BROWSER_EXECUTABLE=$(command -v "$browser")
+    break
+  fi
+done
+
+BROWSER_MODE="unavailable"
+NEEDS_MANAGED_BROWSER=false
+if [[ -n $AGENT_BROWSER_PATH || $WILL_INSTALL_AGENT_BROWSER == true ]]; then
+  if [[ -n $BROWSER_EXECUTABLE ]] && [[ -d $HOME/.config/chromium/Default || -d $HOME/.config/google-chrome/Default ]]; then
+    BROWSER_MODE="real-profile"
+  else
+    BROWSER_MODE="omarvis-browser"
+    [[ -z $BROWSER_EXECUTABLE ]] && NEEDS_MANAGED_BROWSER=true
+  fi
+fi
+
+if [[ $HAVE_WTYPE == true ]]; then
+  printf '  %s wtype (dictation)\n' "$OK"
+fi
+if [[ $BROWSER_MODE == "real-profile" ]]; then
+  printf '  %s browser control: a separate window on a snapshot of your Default profile\n' "$OK"
+  note "  (your logins are available there; changes are not written back to your real profile)"
+elif [[ $BROWSER_MODE == "omarvis-browser" ]]; then
+  printf '  %s browser control: own profile under ~/.local/share/omarvis/browser-profile (separate logins)\n' "$OK"
+else
+  printf '  %s browser control: disabled (npm is unavailable, so agent-browser cannot be installed)\n' "$WARN"
+fi
+
+echo
+echo "This run will:"
+note "• install packages: portaudio python-pyaudio"
+[[ $WILL_INSTALL_AGENT_BROWSER == true ]] && note "• install agent-browser 0.34 via npm"
+[[ $NEEDS_MANAGED_BROWSER == true ]] && note "• install agent-browser's managed browser (no Chromium found)"
+note "• create a Python environment in ~/.local/share/omarvis/venv"
+note "• create or update the \"Omarvis\" agent in your ElevenLabs account"
+note "• offer the J-key bindings for $BINDINGS_PATH (asked below; timestamped backup first)"
+note "• log details to $LOG_PATH"
+echo
+echo "All questions come now; after the last one the rest runs unattended."
+
+# ---------------------------------------------------------------- Decisions
+
+INSTALL_WTYPE=false
+if [[ $HAVE_WTYPE == false ]]; then
+  echo
+  if confirm "Dictation needs wtype. Install it now?" y; then
+    INSTALL_WTYPE=true
+  else
+    printf '%s Dictation will remain unavailable until wtype is installed.\n' "$WARN"
+  fi
+fi
+
+# The key is validated against the exact scope provisioning needs (listing
+# Agents Platform agents is free), so a mistyped or under-scoped key fails
+# right here at the prompt instead of three phases later.
+KEY_CHECK_URL="https://api.elevenlabs.io/v1/convai/agents?page_size=1"
+KEY_REJECTION=""
+
+# 0: valid  1: rejected (KEY_REJECTION says why)  2: could not reach the API
+validate_api_key() {
+  local key=$1 body http_code
+  body=$(mktemp)
+  if ! http_code=$(curl -sS --max-time 15 -o "$body" -w '%{http_code}' \
+      -H "xi-api-key: $key" "$KEY_CHECK_URL" 2>>"$LOG_PATH"); then
+    rm -f "$body"
+    return 2
+  fi
+  if [[ $http_code == 200 ]]; then
+    rm -f "$body"
+    return 0
+  fi
+  cat "$body" >>"$LOG_PATH" || true
+  if grep -q "missing_permissions" "$body"; then
+    KEY_REJECTION="The key works but lacks Agents Platform / Conversational AI access. Edit the key's permissions in the ElevenLabs dashboard (or create an unrestricted key) and paste it again."
+  else
+    KEY_REJECTION="ElevenLabs rejected the key (HTTP $http_code). Check it for truncation and paste it again."
+  fi
+  rm -f "$body"
+  return 1
+}
+
+print_key_instructions() {
+  echo
+  rule
+  printf '%sElevenLabs API key%s\n' "$BOLD" "$RESET"
+  echo "Omarvis needs an ElevenLabs API key. To create one:"
+  echo
+  echo "  1. Sign in at https://elevenlabs.io (any plan; agent calls and"
+  echo "     dictation consume credits from your plan's quota)"
+  echo "  2. Click your profile (bottom-left) → API Keys → Create API Key"
+  echo "  3. Either leave it unrestricted, or restrict it to:"
+  echo "       • Agents Platform / Conversational AI  (the voice agent)"
+  echo "       • Speech to Text                       (dictation)"
+  echo "     A monthly credit cap on the key is a good idea."
+  echo "  4. Copy the key right away — ElevenLabs shows it only once."
+  echo
+  echo "The key is stored only in $KEY_PATH"
+  echo "(readable by you alone) and is sent only to api.elevenlabs.io."
+  rule
+}
+
+store_api_key() {
+  install -d -m 700 "$CONFIG_DIR"
+  install -m 600 /dev/null "$KEY_PATH"
+  printf '%s\n' "$1" >"$KEY_PATH"
+}
+
+if [[ -s $KEY_PATH ]]; then
+  echo
+  printf '%s Using the ElevenLabs key already stored in %s.\n' "$OK" "$KEY_PATH"
+elif [[ -n ${ELEVENLABS_API_KEY:-} ]]; then
+  echo
+  key_status=0
+  validate_api_key "$ELEVENLABS_API_KEY" || key_status=$?
+  if [[ $key_status == 1 ]]; then
+    die "ELEVENLABS_API_KEY is set but was rejected. $KEY_REJECTION"
+  fi
+  [[ $key_status == 2 ]] && printf '%s Could not reach api.elevenlabs.io to validate ELEVENLABS_API_KEY; storing it unvalidated.\n' "$WARN"
+  store_api_key "$ELEVENLABS_API_KEY"
+  printf '%s Stored the ElevenLabs key from your environment.\n' "$OK"
+elif [[ $ASSUME_YES == true || ! -t 0 ]]; then
+  die "No ElevenLabs key is stored and no terminal is available to ask for one. Export ELEVENLABS_API_KEY and run omarvis-setup again."
+else
+  print_key_instructions
+  while true; do
+    read -r -s -p "ElevenLabs API key (input hidden): " api_key
+    echo
+    if [[ -z $api_key ]]; then
+      echo "Nothing entered. Paste the key, or press Ctrl+C to abort."
+      continue
+    fi
+    key_status=0
+    validate_api_key "$api_key" || key_status=$?
+    if [[ $key_status == 0 ]]; then
+      printf '%s Key accepted — Agents Platform access confirmed.\n' "$OK"
+      break
+    elif [[ $key_status == 2 ]]; then
+      printf '%s Could not reach api.elevenlabs.io to validate the key (details in %s).\n' "$WARN" "$LOG_PATH"
+      if confirm "Store it unvalidated and continue?" y; then break; fi
+    else
+      printf '%s %s\n' "$BAD" "$KEY_REJECTION"
+    fi
+  done
+  store_api_key "$api_key"
+  unset api_key
+fi
+
+missing_bindings=()
+needs_dictation_rebind=false
+has_retired_bindings=false
+if [[ -f $BINDINGS_PATH ]]; then
+  grep -Fq 'omarchy-shell omarvis toggle")' "$BINDINGS_PATH" || missing_bindings+=("$AGENT_BINDING")
+  # Ask mode and the typed one-shot no longer exist. Any binding left over
+  # from an older install would now dead-end, so setup deletes it.
+  if grep -Eq 'omarvis (toggle|toggleMode) ask"|/bin/omarvis-text"' "$BINDINGS_PATH"; then
+    has_retired_bindings=true
+  fi
+  if ! grep -Fq "$DICTATE_UNBIND" "$BINDINGS_PATH"; then
+    needs_dictation_rebind=true
+    missing_bindings+=("$DICTATE_UNBIND" "$DICTATE_START_BINDING" "$DICTATE_STOP_BINDING")
+  else
+    grep -Fq 'omarchy-shell omarvis dictate start")' "$BINDINGS_PATH" || missing_bindings+=("$DICTATE_START_BINDING")
+    grep -Fq 'omarchy-shell omarvis dictate stop", { release = true })' "$BINDINGS_PATH" || missing_bindings+=("$DICTATE_STOP_BINDING")
+  fi
+  grep -Fq 'omarchy-shell omarvis panel")' "$BINDINGS_PATH" || missing_bindings+=("$PANEL_BINDING")
+  grep -Fq 'omarchy-shell omarvis toggleRemote")' "$BINDINGS_PATH" || missing_bindings+=("$REMOTE_BINDING")
+fi
+APPLY_BINDINGS=false
+if (( ${#missing_bindings[@]} > 0 )) || [[ $has_retired_bindings == true ]]; then
+  echo
+  echo "Hotkey bindings:"
+  echo "$AGENT_BINDING"
+  echo "$DICTATE_UNBIND  -- replaces Omarchy's Toggle window split binding"
+  echo "$DICTATE_START_BINDING"
+  echo "$DICTATE_STOP_BINDING"
+  echo "$PANEL_BINDING"
+  echo "$REMOTE_BINDING"
+  if confirm "Update the missing or outdated bindings in $BINDINGS_PATH? (timestamped backup first)" n; then
+    APPLY_BINDINGS=true
+  fi
+elif [[ -f $BINDINGS_PATH ]]; then
+  printf '%s Keybindings already configured in %s.\n' "$OK" "$BINDINGS_PATH"
+fi
+
+# --------------------------------------------------------------- Unattended
+
+phase 1 "Installing packages"
+run_logged "omarchy pkg add portaudio python-pyaudio" omarchy pkg add portaudio python-pyaudio
+if [[ $INSTALL_WTYPE == true ]]; then
+  run_logged "omarchy pkg add wtype" omarchy pkg add wtype
+fi
+if [[ $WILL_INSTALL_AGENT_BROWSER == true ]]; then
+  run_logged "npm install -g agent-browser@0.34" npm install -g agent-browser@0.34
+  AGENT_BROWSER_PATH=$(command -v agent-browser || true)
+fi
+if [[ $NEEDS_MANAGED_BROWSER == true && -n $AGENT_BROWSER_PATH ]]; then
+  run_logged "agent-browser install (managed browser)" agent-browser install
+fi
+
+phase 2 "Creating the Python environment"
+run_logged "python -m venv $VENV_DIR" python -m venv --system-site-packages "$VENV_DIR"
+run_logged "pip install elevenlabs qrcode" "$VENV_DIR/bin/pip" install -q "elevenlabs==2.65.0" "qrcode==8.2"
+
+phase 3 "Writing configuration"
+install -d -m 700 "$CONFIG_DIR"
+existing='{}'
+if [[ -f $CONFIG_PATH ]]; then
+  existing=$(cat "$CONFIG_PATH")
+fi
+updated=$(jq \
+  --arg browser_mode "$BROWSER_MODE" \
+  --arg agent_browser_path "$AGENT_BROWSER_PATH" \
+  --arg browser_executable_path "$BROWSER_EXECUTABLE" \
+  '(del(.vision) | del(.ask_agent_id)) + {
+    agent_id: (.agent_id // ""),
+    llm: (.llm // "gpt-5.6-sol"),
+    voice_id: (.voice_id // "JSWO6cw2AyFE324d5kEr"),
+    input_device_index: (.input_device_index // null),
+    herdr_announcements: (.herdr_announcements // true),
+    web_port: (.web_port // 4763),
+    browser_mode: $browser_mode,
+    agent_browser_path: $agent_browser_path,
+    profile_path: (.profile_path // "~/.config/omarchy/omarvis/profile.md"),
+    screenshot_cache_max_age_seconds: (.screenshot_cache_max_age_seconds // 86400),
+    browser_executable_path: $browser_executable_path,
+    dictation: (((.dictation // {}) | del(.chunk_size)) + {
+      language: (.dictation.language // ""),
+      cleanup: (.dictation.cleanup // true),
+      model_id: (.dictation.model_id // "scribe_v2")
+    }),
+    ui: (((.ui // {}) | del(.earcons)) + {
+      hud_position: (.ui.hud_position // "top-center")
+    })
+  }' <<<"$existing")
+install -m 600 /dev/null "$CONFIG_PATH"
+printf '%s\n' "$updated" >"$CONFIG_PATH"
+note "· merged $CONFIG_PATH"
+
+if [[ ! -e $PROFILE_PATH ]]; then
+  install -m 600 /dev/null "$PROFILE_PATH"
+  printf '%s\n' \
+    '# Omarvis profile' \
+    '' \
+    '- Preferred name: ' \
+    '- Work and projects: ' \
+    '- Omarchy preferences: ' >"$PROFILE_PATH"
+  note "· seeded $PROFILE_PATH"
+fi
+
+phase 4 "Provisioning the ElevenLabs agent"
+(cd "$PLUGIN_DIR" && "$VENV_DIR/bin/python" -m omarvis.provision)
+
+phase 5 "Keybindings"
+if [[ $APPLY_BINDINGS == true ]]; then
+  backup="$BINDINGS_PATH.$(date +%Y%m%d-%H%M%S).bak"
+  cp "$BINDINGS_PATH" "$backup"
+  if [[ $needs_dictation_rebind == true ]]; then
+    sed -i \
+      -e '\|omarchy-shell omarvis dictate start")|d' \
+      -e '\|omarchy-shell omarvis dictate stop", { release = true })|d' \
+      "$BINDINGS_PATH"
+  fi
+  if [[ $has_retired_bindings == true ]]; then
+    sed -i -E '/omarvis (toggle|toggleMode) ask"|\/bin\/omarvis-text"/d' "$BINDINGS_PATH"
+  fi
+  if (( ${#missing_bindings[@]} > 0 )); then
+    printf '\n' >>"$BINDINGS_PATH"
+    printf '%s\n' "${missing_bindings[@]}" >>"$BINDINGS_PATH"
+  fi
+  note "· updated bindings (backup: $backup)"
+elif (( ${#missing_bindings[@]} > 0 )) || [[ $has_retired_bindings == true ]]; then
+  note "· skipped at your request — run omarvis-setup again to be asked again"
+else
+  note "· nothing to change"
+fi
+
+phase 6 "Registering the plugin"
+run_logged "omarchy-shell shell rescanPlugins" omarchy-shell shell rescanPlugins
+run_logged "omarchy plugin enable io.github.eliasstravik.omarvis" omarchy plugin enable io.github.eliasstravik.omarvis
+PLUGIN_LOADED=false
+if omarchy-shell shell listPlugins 2>>"$LOG_PATH" | jq -e '.[] | select(.id == "io.github.eliasstravik.omarvis")' >>"$LOG_PATH" 2>&1; then
+  PLUGIN_LOADED=true
+fi
+SERVICE_OK=false
+if omarchy-shell omarvis status >>"$LOG_PATH" 2>&1; then
+  SERVICE_OK=true
+fi
+
+# ------------------------------------------------------------------ Receipt
+
+AGENT_ID=$(jq -r '.agent_id // ""' "$CONFIG_PATH" 2>/dev/null || echo "")
+
+echo
+rule
+printf '%sOmarvis is ready.%s\n' "$BOLD" "$RESET"
+printf '  %s ElevenLabs agent: %s\n' "$OK" "${AGENT_ID:-(missing — see the provisioning output above)}"
+case $BROWSER_MODE in
+  real-profile)
+    printf '  %s Browser control: snapshot of your Default profile (logins available, nothing written back)\n' "$OK" ;;
+  omarvis-browser)
+    printf '  %s Browser control: own profile under ~/.local/share/omarvis/browser-profile\n' "$OK" ;;
+  *)
+    printf '  %s Browser control: disabled (install npm and re-run omarvis-setup to enable it)\n' "$WARN" ;;
+esac
+printf '  %s API key: %s (readable by you alone)\n' "$OK" "$KEY_PATH"
+if [[ $PLUGIN_LOADED == true && $SERVICE_OK == true ]]; then
+  printf '  %s Plugin loaded and the service is responding\n' "$OK"
+else
+  printf '  %s Self-check failed — see %s and try: omarchy-shell omarvis status\n' "$WARN" "$LOG_PATH"
+fi
+note "· Memory: personalize $PROFILE_PATH (up to 2000 characters are used)"
+note "· Log: $LOG_PATH"
+echo
+printf '🎉 %sThat'"'"'s everything — your desktop can talk now. Have fun!%s\n' "$BOLD" "$RESET"
+echo
+printf '%sNext:%s press SUPER + CTRL + J and say "switch to workspace 2" — or click the bar microphone.\n' "$BOLD" "$RESET"
+echo
+echo "Remote phone access stays off until you enable it in the Omarvis panel."
+echo "It uses Tailscale Serve only (never Funnel); the phone must be on your tailnet."
+echo "Treat the QR and URL like terminal access: whoever holds either can install software and run terminal commands on this computer."
+echo "Scan the QR instead of copying the URL when possible, because copied URLs remain in clipboard history."

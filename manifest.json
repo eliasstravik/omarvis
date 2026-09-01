@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.eliasstravik.omarvis",
+  "name": "Omarvis",
+  "version": "0.2.0",
+  "author": "Elias Stravik",
+  "license": "MIT",
+  "description": "Voice control for Omarchy via ElevenLabs Agents",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Omarvis",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showLabel": false
+    },
+    "schema": [
+      {
+        "key": "showLabel",
+        "type": "bool",
+        "label": "Show state label"
+      }
+    ]
+  }
+}

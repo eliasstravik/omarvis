@@ -1,0 +1,3 @@
+module Omarvis
+Service 1.0 Service.qml
+HudWindow 1.0 HudWindow.qml

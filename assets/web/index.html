@@ -1,0 +1,618 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <base href="./">
+  <title>Omarvis</title>
+  <style>
+    /* OMARVIS_THEME */
+
+    /* The phone is not an Omarchy machine, so the Nerd Font the state glyphs
+       live in travels with the page as a subset of this page's vocabulary. */
+    @font-face {
+      font-family: "JetBrainsMono NF";
+      src: url("./fonts/jetbrains-mono-nf-regular.woff2?k=OMARVIS_PAIRING_KEY") format("woff2");
+      font-weight: 400;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: "JetBrainsMono NF";
+      src: url("./fonts/jetbrains-mono-nf-bold.woff2?k=OMARVIS_PAIRING_KEY") format("woff2");
+      font-weight: 700;
+      font-display: swap;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; margin: 0; }
+
+    /* Opaque, square, hairline-bordered: the same surface grammar as the
+       desktop HUD. No wallpaper, no blur, no shadow, nothing rounded. */
+    body {
+      display: grid;
+      place-items: center;
+      min-height: 100dvh;
+      padding: max(20px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+        max(20px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+      color: var(--omarvis-text);
+      background: var(--omarvis-background);
+      font-family: "JetBrainsMono NF", monospace;
+      -webkit-text-size-adjust: 100%;
+    }
+    button { font: inherit; }
+
+    main {
+      display: grid;
+      gap: 24px;
+      width: min(100%, 420px);
+      padding: 24px;
+      border: 2px solid var(--omarvis-accent);
+      border-radius: 0;
+      background: var(--omarvis-surface);
+    }
+
+    /* Hierarchy by weight and letter-spacing, never by extra color. */
+    .caption {
+      margin: 0;
+      color: color-mix(in srgb, var(--omarvis-text) 62%, transparent);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    .state {
+      display: grid;
+      gap: 18px;
+      justify-items: center;
+    }
+    .glyph {
+      color: var(--omarvis-text);
+      font-size: 44px;
+      line-height: 1;
+    }
+    .glyph.accent { color: var(--omarvis-accent); }
+    .glyph.active { color: var(--omarvis-active); }
+    .glyph.urgent { color: var(--omarvis-urgent); }
+    /* Pulse means wait — the same 950ms beat the desktop HUD uses. */
+    .glyph.waiting { animation: omarvis-pulse 1900ms ease-in-out infinite; }
+    @keyframes omarvis-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: .35; }
+    }
+
+    .meter {
+      width: 100%;
+      height: 6px;
+      background: color-mix(in srgb, var(--omarvis-text) 45%, transparent);
+    }
+    .meter-fill {
+      width: 0;
+      height: 100%;
+      background: var(--omarvis-accent);
+      transition: width 140ms cubic-bezier(0.33, 1, 0.68, 1);
+    }
+    .meter-fill.sweep {
+      width: 33%;
+      animation: omarvis-sweep 1900ms ease-in-out infinite;
+      transition: none;
+    }
+    @keyframes omarvis-sweep {
+      0%, 100% { transform: translateX(0); }
+      50% { transform: translateX(203%); }
+    }
+
+    /* One full-width square action. Accent fill with background-color text
+       when primary; foreground-tint fills for every secondary state. */
+    .talk {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      width: 100%;
+      min-height: 72px;
+      padding: 0 16px;
+      border: 2px solid var(--omarvis-accent);
+      border-radius: 0;
+      color: var(--omarvis-background);
+      background: var(--omarvis-accent);
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      cursor: pointer;
+      touch-action: manipulation;
+      transition: background-color 140ms cubic-bezier(0.33, 1, 0.68, 1),
+        color 140ms cubic-bezier(0.33, 1, 0.68, 1),
+        border-color 140ms cubic-bezier(0.33, 1, 0.68, 1);
+    }
+    .talk .talk-glyph { font-size: 20px; line-height: 1; }
+    .talk.secondary {
+      border: 1px solid color-mix(in srgb, var(--omarvis-text) 40%, transparent);
+      color: var(--omarvis-text);
+      background: color-mix(in srgb, var(--omarvis-text) 8%, transparent);
+    }
+    .talk.danger { color: var(--omarvis-urgent); }
+    .talk:disabled {
+      border: 1px solid color-mix(in srgb, var(--omarvis-text) 40%, transparent);
+      color: color-mix(in srgb, var(--omarvis-text) 70%, transparent);
+      background: color-mix(in srgb, var(--omarvis-text) 4%, transparent);
+      cursor: wait;
+    }
+
+    /* No visible prose anywhere: the glyph, the meter and the button carry
+       the whole story, exactly like the desktop HUD. Status text exists only
+       for screen readers. */
+    .sr {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+
+    @media (max-width: 360px) {
+      main { gap: 20px; padding: 18px; }
+      .glyph { font-size: 38px; }
+      .talk { font-size: 15px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation: none !important;
+        scroll-behavior: auto !important;
+        transition: none !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="caption" id="machine">computer</p>
+    </header>
+
+    <section class="state" aria-label="Conversation status" aria-live="polite">
+      <div class="glyph" id="glyph" aria-hidden="true"></div>
+      <div class="meter"><div class="meter-fill" id="meter-fill"></div></div>
+    </section>
+
+    <button class="talk" id="talk" type="button">
+      <span class="talk-glyph" id="talk-glyph" aria-hidden="true"></span>
+      <span id="talk-label">Talk</span>
+    </button>
+
+    <p class="sr" id="status" aria-live="polite"></p>
+  </main>
+
+  <script src="./vendor/elevenlabs-client-1.23.0.iife.js?k=OMARVIS_PAIRING_KEY"></script>
+  <script>
+    (() => {
+      "use strict";
+
+      const secret = new URLSearchParams(location.search).get("k") || "";
+      const elements = {
+        talk: document.getElementById("talk"),
+        talkLabel: document.getElementById("talk-label"),
+        talkGlyph: document.getElementById("talk-glyph"),
+        glyph: document.getElementById("glyph"),
+        meterFill: document.getElementById("meter-fill"),
+        status: document.getElementById("status"),
+      };
+
+      // Three glyphs, same as the desktop: hourglass for any waiting or
+      // busywork, a solid microphone only ever means the floor is yours,
+      // the agent's own voice is the speaker glyph — plus the alert mark
+      // for failure. A finished call simply returns to idle.
+      const GLYPH = {
+        mic: String.fromCodePoint(0xF036C),
+        waiting: String.fromCodePoint(0xF051F),
+        speaking: String.fromCodePoint(0xF057E),
+        alert: String.fromCodePoint(0xF0026),
+        stop: String.fromCodePoint(0xF04DB),
+      };
+
+      document.getElementById("machine").textContent = "Omarvis";
+
+      let conversation = null;
+      let eventStream = null;
+      let pingTimer = null;
+      let meterTimer = null;
+      let starting = false;
+      let ending = false;
+      let disconnectedDuringStart = false;
+      let expectedConversationId = "";
+      let transcriptChain = Promise.resolve();
+      let relayChain = Promise.resolve();
+      let runInFlight = false;
+      let bufferedSee = null;
+      let agentSpeaking = false;
+      let currentState = "idle";
+      // "Thinking" is inferred exactly the way the desktop daemon infers it:
+      // the SDK emits no thinking event, but it does deliver the final user
+      // transcript — from that moment until the agent speaks, the agent is
+      // working. A failsafe timeout keeps the hourglass from ever sticking.
+      let pondering = false;
+      let ponderTimer = null;
+      // The microphone is requested once per page load and then kept (muted
+      // between calls), so the browser's permission prompt fires at most once
+      // rather than on every Talk.
+      let micStream = null;
+
+      class ApiError extends Error {
+        constructor(status, message) {
+          super(message);
+          this.name = "ApiError";
+          this.status = status;
+        }
+      }
+
+      function setStatus(text) {
+        elements.status.textContent = text;
+      }
+
+      // One place decides what every surface on the page shows, so the glyph,
+      // the meter and the button can never disagree about the state.
+      function paint() {
+        const state = currentState;
+        const live = state === "listening" || state === "speaking";
+        let glyph = GLYPH.mic;
+        let cls = "glyph";
+        if (state === "error") {
+          glyph = GLYPH.alert; cls = "glyph urgent";
+        } else if (state === "waiting") {
+          glyph = GLYPH.waiting; cls = "glyph waiting";
+        } else if (state === "speaking") {
+          glyph = GLYPH.speaking; cls = "glyph accent";
+        } else if ((runInFlight || pondering) && live) {
+          // Working: the agent has your words and is thinking, or a command
+          // is running on the computer, and it has not started speaking
+          // yet. One generic hourglass, no per-tool glyphs, matching the
+          // desktop.
+          glyph = GLYPH.waiting; cls = "glyph accent";
+        } else if (state === "listening") {
+          glyph = GLYPH.mic; cls = "glyph active";
+        }
+        elements.glyph.className = cls;
+        elements.glyph.textContent = glyph;
+
+        const sweeping = state === "waiting";
+        elements.meterFill.classList.toggle("sweep", sweeping);
+        if (sweeping) {
+          // Clear the inline width so the sweep class's own width applies —
+          // an inline "0" would beat the class and hide the sweep entirely.
+          elements.meterFill.style.width = "";
+        } else if (!live) {
+          elements.meterFill.style.width = "0";
+        }
+
+        elements.talk.classList.toggle("secondary", state !== "idle");
+        elements.talk.classList.toggle("danger", live);
+        elements.talk.disabled = sweeping;
+        elements.talkLabel.textContent = sweeping ? "Connecting" : (live ? "End" : "Talk");
+        elements.talkGlyph.textContent = sweeping
+          ? GLYPH.waiting
+          : (live ? GLYPH.stop : GLYPH.mic);
+      }
+
+      function render(state) {
+        currentState = state;
+        paint();
+      }
+
+      function setPondering(active) {
+        pondering = active;
+        clearTimeout(ponderTimer);
+        ponderTimer = null;
+        if (active) {
+          ponderTimer = setTimeout(() => {
+            pondering = false;
+            paint();
+          }, 12000);
+        }
+        paint();
+      }
+
+      async function ensureMic() {
+        const alive = micStream && micStream.getTracks().some((t) => t.readyState === "live");
+        if (!alive) {
+          micStream = await navigator.mediaDevices.getUserMedia({audio: true});
+        }
+        micStream.getTracks().forEach((t) => { t.enabled = true; });
+      }
+
+      function muteMic() {
+        if (micStream) micStream.getTracks().forEach((t) => { t.enabled = false; });
+      }
+
+      window.addEventListener("pagehide", () => {
+        if (micStream) micStream.getTracks().forEach((t) => t.stop());
+        micStream = null;
+      });
+
+      // The SDK's getInputVolume/getOutputVolume are already normalized 0-1
+      // (unlike the desktop's raw PCM RMS, which needs a dBFS boost), so the
+      // bar maps them linearly — a dB curve here pegs the meter on a
+      // whisper. The small gate keeps ambient noise from flickering it.
+      function meterFraction(level) {
+        if (!(level > 0.05)) return 0;
+        return Math.min(1, level);
+      }
+
+      function startMeter() {
+        clearInterval(meterTimer);
+        meterTimer = setInterval(() => {
+          if (!conversation) return;
+          let level = 0;
+          try {
+            level = agentSpeaking
+              ? conversation.getOutputVolume()
+              : conversation.getInputVolume();
+          } catch (_error) {
+            level = 0;
+          }
+          elements.meterFill.style.width = `${(meterFraction(level) * 100).toFixed(1)}%`;
+        }, 120);
+      }
+
+      function stopMeter() {
+        clearInterval(meterTimer);
+        meterTimer = null;
+        elements.meterFill.style.width = "0";
+      }
+
+      async function post(path, payload = {}) {
+        const response = await fetch(path, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${secret}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        });
+        let body = {};
+        try {
+          body = await response.json();
+        } catch (_error) {
+          body = {};
+        }
+        if (!response.ok) {
+          throw new ApiError(response.status, body.error || `Request failed (${response.status})`);
+        }
+        return body;
+      }
+
+      function queueTranscript(message) {
+        transcriptChain = transcriptChain
+          .then(() => post("./api/transcript", {text: message, final: true}))
+          .catch((error) => {
+            setStatus(`Transcript relay failed: ${error.message}`);
+          });
+      }
+
+      async function flushSeeReady() {
+        if (!bufferedSee || runInFlight || !conversation || ending) return;
+        const event = bufferedSee;
+        bufferedSee = null;
+        try {
+          await conversation.sendMultimodalMessage({
+            text: "Here is the current desktop screenshot. Describe what is visible and answer the user's question.",
+            fileId: event.file_id,
+          });
+        } catch (error) {
+          setStatus(`Screenshot delivery failed: ${error.message}`);
+        }
+      }
+
+      async function performRelay(parameters) {
+        runInFlight = true;
+        paint();
+        try {
+          const result = await post("./api/run", parameters || {});
+          return JSON.stringify(result);
+        } catch (error) {
+          // A 409 does not end phone audio. The terminal SSE event is authoritative.
+          return JSON.stringify({status: "error", error: error.message, http_status: error.status || 0});
+        } finally {
+          runInFlight = false;
+          paint();
+          // Promise callbacks carrying the tool result run before this timer, preserving
+          // result-first, screenshot-second protocol ordering across HTTP and SSE.
+          setTimeout(flushSeeReady, 0);
+        }
+      }
+
+      function relayRun(parameters) {
+        const task = relayChain.then(() => performRelay(parameters));
+        relayChain = task.catch(() => undefined);
+        return task;
+      }
+
+      function handleRemoteEvent(event) {
+        if (event.event === "context" && conversation && event.text) {
+          conversation.sendContextualUpdate(event.text);
+          return;
+        }
+        if (event.event === "see-ready" && event.file_id) {
+          if (bufferedSee) {
+            setStatus("A second screenshot arrived before the first was delivered.");
+            return;
+          }
+          bufferedSee = event;
+          if (!runInFlight) setTimeout(flushSeeReady, 0);
+          return;
+        }
+        if (event.event === "ended") {
+          void endConversation(`Session ended: ${event.reason || "computer ended it"}`, false);
+        }
+      }
+
+      function openEvents() {
+        return new Promise((resolve, reject) => {
+          let opened = false;
+          const stream = new EventSource(`./api/events?k=${encodeURIComponent(secret)}`);
+          eventStream = stream;
+          stream.onopen = () => {
+            opened = true;
+            resolve();
+          };
+          stream.onmessage = (message) => {
+            try {
+              handleRemoteEvent(JSON.parse(message.data));
+            } catch (_error) {
+              setStatus("The computer sent an unreadable event.");
+            }
+          };
+          stream.onerror = () => {
+            if (!opened) reject(new Error("Could not open the secure event stream."));
+            else if (!ending) setStatus("Reconnecting to the computer…");
+          };
+        });
+      }
+
+      function startPings() {
+        clearInterval(pingTimer);
+        pingTimer = setInterval(() => {
+          post("./api/ping").catch((error) => {
+            if (!ending) setStatus(`Computer link: ${error.message}`);
+          });
+        }, 5000);
+      }
+
+      async function endConversation(reason, notifyServer = true) {
+        if (ending) return;
+        ending = true;
+        clearInterval(pingTimer);
+        pingTimer = null;
+        stopMeter();
+        if (eventStream) {
+          eventStream.close();
+          eventStream = null;
+        }
+        const active = conversation;
+        conversation = null;
+        if (active) {
+          try { await active.endSession(); } catch (_error) { /* already disconnected */ }
+        }
+        if (notifyServer) {
+          try { await post("./api/session/end"); } catch (_error) { /* lifeline is authoritative */ }
+        }
+        bufferedSee = null;
+        runInFlight = false;
+        pondering = false;
+        clearTimeout(ponderTimer);
+        ponderTimer = null;
+        agentSpeaking = false;
+        expectedConversationId = "";
+        disconnectedDuringStart = false;
+        starting = false;
+        ending = false;
+        muteMic();
+        render("idle");
+        setStatus(reason);
+      }
+
+      async function startConversation() {
+        if (starting || conversation) return;
+        starting = true;
+        disconnectedDuringStart = false;
+        render("waiting");
+        setStatus("Ending any computer conversation and preparing the microphone…");
+        try {
+          if (!secret) throw new ApiError(403, "Missing pairing key");
+          // Ask for the microphone before anything else: the permission
+          // prompt overlaps the connection handshake, and the stream is kept
+          // for the page's lifetime so the prompt never repeats.
+          await ensureMic();
+          const token = await post("./api/token");
+          if (!token.local_ended) {
+            throw new Error("The computer conversation could not be stopped. Try again.");
+          }
+          if (!token.token || !token.conversation_id) {
+            throw new Error("The computer returned an incomplete conversation token.");
+          }
+          expectedConversationId = token.conversation_id;
+
+          // The stream must be attached before ElevenLabs can invoke the run tool.
+          await openEvents();
+
+          const started = await ElevenLabsClient.Conversation.startSession({
+            conversationToken: token.token,
+            connectionType: "webrtc",
+            dynamicVariables: token.dynamic_variables || {},
+            clientTools: {run: relayRun},
+            onConnect: () => {
+              agentSpeaking = false;
+              render("listening");
+            },
+            onDisconnect: () => {
+              if (starting && !conversation) {
+                disconnectedDuringStart = true;
+              } else if (!ending) {
+                void endConversation("Conversation disconnected.");
+              }
+            },
+            onError: (message) => {
+              setStatus(`Conversation error: ${message}`);
+            },
+            onMessage: ({role, message}) => {
+              if (role === "user" && message) {
+                queueTranscript(message);
+                if (!agentSpeaking) setPondering(true);
+              }
+            },
+            onModeChange: ({mode}) => {
+              agentSpeaking = mode === "speaking";
+              setPondering(false);
+              if (conversation) render(agentSpeaking ? "speaking" : "listening");
+            },
+            onStatusChange: ({status}) => {
+              if (status === "connecting") setStatus("Connecting to the agent…");
+            },
+          });
+
+          if (started.getId() !== expectedConversationId || disconnectedDuringStart) {
+            try { await started.endSession(); } catch (_error) { /* fail closed */ }
+            throw new Error(
+              disconnectedDuringStart
+                ? "Conversation disconnected while starting. Try again."
+                : "Conversation identity mismatch. Session closed."
+            );
+          }
+          conversation = started;
+          starting = false;
+          render(agentSpeaking ? "speaking" : "listening");
+          setStatus("Phone conversation active.");
+          startPings();
+          startMeter();
+        } catch (error) {
+          if (eventStream) {
+            eventStream.close();
+            eventStream = null;
+          }
+          try { await post("./api/session/end"); } catch (_ignored) { /* no session is fine */ }
+          disconnectedDuringStart = false;
+          starting = false;
+          stopMeter();
+          muteMic();
+          render("error");
+          setStatus(error.message || "Could not start the phone conversation.");
+        }
+      }
+
+      elements.talk.addEventListener("click", () => {
+        if (conversation) void endConversation("Phone conversation ended.");
+        else void startConversation();
+      });
+
+      render("idle");
+      if (!secret) {
+        render("error");
+        setStatus("This page needs the pairing link from the Omarvis panel.");
+      }
+    })();
+  </script>
+</body>
+</html>
