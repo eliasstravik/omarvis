@@ -1,0 +1,6 @@
+# Dev-only dependencies. Runtime dependencies are pinned in bin/omarvis-setup,
+# which provisions the venv at ~/.local/share/omarvis/venv. To run the tests:
+#
+#   ~/.local/share/omarvis/venv/bin/pip install -r requirements-dev.txt
+#   PYTHONPATH=. ~/.local/share/omarvis/venv/bin/python -m pytest tests/ -q
+pytest==9.1.1
