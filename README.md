@@ -50,7 +50,7 @@ Hold Super+J, speak, release. The transcript is typed into the focused window. D
 
 <table>
 <tr>
-<td align="center" valign="top" width="33%"><h3>1️⃣</h3><b>Install and run setup</b><br /><sub>Run <code>omarchy plugin add https://github.com/eliasstravik/omarvis.git --enable --yes</code>, then the printed <code>omarvis-setup</code>. It installs its own dependencies.</sub></td>
+<td align="center" valign="top" width="33%"><h3>1️⃣</h3><b>Install and run setup</b><br /><sub>Run <code>omarchy plugin add https://github.com/eliasstravik/omarvis.git --enable --yes</code>, then run <code>~/.config/omarchy/plugins/io.github.eliasstravik.omarvis/bin/omarvis-setup</code>. It installs its own dependencies.</sub></td>
 <td align="center" valign="top" width="33%"><h3>2️⃣</h3><b>Paste your ElevenLabs key</b><br /><sub>Setup asks once, stores the key readable only by you, and adds the J-key bindings after a timestamped backup of your config.</sub></td>
 <td align="center" valign="top" width="33%"><h3>3️⃣</h3><b>Press Super+Ctrl+J and talk</b><br /><sub>Say "switch to workspace 2" and watch it happen. Press the hotkey again to hang up.</sub></td>
 </tr>
