@@ -21,7 +21,7 @@ Install and enable the plugin on the Omarchy machine:
 
 ```bash
 omarchy plugin add https://github.com/eliasstravik/Omarvis.git --enable --yes
-~/.config/omarchy/plugins/omarvis.voice/bin/omarvis-setup
+~/.config/omarchy/plugins/io.github.eliasstravik.omarvis/bin/omarvis-setup
 ```
 
 You can provide the API key in `ELEVENLABS_API_KEY`. If it is absent, setup asks for it and writes `~/.config/omarchy/omarvis/api_key` with mode 600.
@@ -42,7 +42,7 @@ o.bind("SUPER + CTRL + ALT + J", "Omarvis Panel", "omarchy-shell omarvis panel")
 
 The native Omarchy panel is deliberately small: a hero with the state glyph and a one-word status, one Start/End button, and the REMOTE section. There is no mode choice, no transcript, and no scrolling. Conversation text lives in the bar tooltip, dictation history lives in Omarchy's clipboard manager, and anything that needs real reading — a failed voice session, a remote service that cannot serve — goes to the notification server. The REMOTE section shows the pairing QR while remote access is on and no phone is connected; when a phone joins, the QR is replaced by a PHONE CONNECTED row and an end-session button. The copy glyph beside the QR puts the pairing URL on the clipboard for the cases a camera cannot reach.
 
-The panel uses the existing `omarvis.voice` module id and the existing `entryPoints.barWidget` manifest key, so upgrading from the former click-to-toggle widget requires no `shell.json` migration. Opening another stock panel closes Omarvis through Omarchy's normal one-popup coordinator.
+The plugin id is `io.github.eliasstravik.omarvis`. Installs from before 0.2.0 used the id `omarvis.voice`; upgrading across that rename means removing the old plugin and adding this one again, after which the bar widget must be re-added to `shell.json`. Opening another stock panel closes Omarvis through Omarchy's normal one-popup coordinator.
 
 ## Remote control from your phone
 
@@ -151,7 +151,7 @@ In `own-browser` mode, if the browser says approval is pending, click Allow in C
 Removing the Omarvis widget from the bar removes the plugin's only entry from `shell.json`. Omarchy then unmounts the service, so the hotkey stops working. Restore it with:
 
 ```bash
-omarchy plugin enable omarvis.voice
+omarchy plugin enable io.github.eliasstravik.omarvis
 ```
 
 The QML, microphone, and full desktop flows require an Omarchy machine. Run `omarchy plugin validate .`, the setup self-check, and the end-to-end checklist there before treating a release as verified.

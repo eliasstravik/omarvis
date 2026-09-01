@@ -1,7 +1,7 @@
 # Stage 6.2 — client acceptance checklist
 
 Run this on the Omarchy desktop after the changed checkout is installed as the
-active `omarvis.voice` plugin and `omarchy-shell` is running.
+active `io.github.eliasstravik.omarvis` plugin and `omarchy-shell` is running.
 
 Client direction after Stage 6.2 removed Omarvis-owned last-dictation display
 and state. Successful transcripts still copy to Wayland, but Omarchy's

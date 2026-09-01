@@ -17,7 +17,7 @@ On the Omarchy machine:
 
 ```bash
 omarchy plugin add https://github.com/eliasstravik/omarvis.git --enable --yes
-~/.config/omarchy/plugins/omarvis.voice/bin/omarvis-setup
+~/.config/omarchy/plugins/io.github.eliasstravik.omarvis/bin/omarvis-setup
 ```
 
 Setup installs PortAudio, PyAudio, the ElevenLabs SDK, and agent-browser, and creates its runtime files under `~/.config/omarchy/omarvis/` and `~/.local/share/omarvis/`.
@@ -53,5 +53,22 @@ The workspace switches, and a small strip under the bar shows the session state:
 - Ask about something on your screen. Omarvis uploads one screenshot and answers out loud.
 - Turn on Remote access in the panel and scan the QR with a phone on your tailnet. Read the [remote control security notes](reference.md#remote-control-from-your-phone) first.
 - The full [reference](reference.md) covers the panel, browser modes, microphone selection, privacy, and troubleshooting.
+
+## Uninstall
+
+Remove the plugin and everything it created:
+
+```bash
+omarchy plugin remove io.github.eliasstravik.omarvis
+rm -rf ~/.config/omarchy/omarvis ~/.local/share/omarvis
+```
+
+If you enabled Remote access at some point, also clear the Tailscale mount:
+
+```bash
+tailscale serve --set-path /omarvis off
+```
+
+Setup only ever appended the J-key bindings to `~/.config/hypr/bindings.lua` after asking you and making a timestamped backup. Delete the `omarvis` lines there (or restore the backup) to finish.
 
 Stuck? [Open an issue](https://github.com/eliasstravik/omarvis/issues/new).

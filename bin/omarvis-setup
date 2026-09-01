@@ -190,11 +190,11 @@ if (( ${#missing_bindings[@]} > 0 )) || [[ $has_retired_bindings == true ]]; the
 fi
 
 omarchy-shell shell rescanPlugins
-omarchy plugin enable omarvis.voice
+omarchy plugin enable io.github.eliasstravik.omarvis
 
 echo
 echo "Plugin self-check:"
-omarchy-shell shell listPlugins | jq '.[] | select(.id == "omarvis.voice")'
+omarchy-shell shell listPlugins | jq '.[] | select(.id == "io.github.eliasstravik.omarvis")'
 omarchy-shell omarvis status
 
 echo
