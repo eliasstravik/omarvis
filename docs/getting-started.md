@@ -20,11 +20,18 @@ omarchy plugin add https://github.com/eliasstravik/omarvis.git --enable --yes
 ~/.config/omarchy/plugins/io.github.eliasstravik.omarvis/bin/omarvis-setup
 ```
 
-Setup installs PortAudio, PyAudio, the ElevenLabs SDK, and agent-browser, and creates its runtime files under `~/.config/omarchy/omarvis/` and `~/.local/share/omarvis/`.
+Setup asks all its questions first, then runs unattended: it installs PortAudio, PyAudio, the ElevenLabs SDK, and agent-browser, and creates its runtime files under `~/.config/omarchy/omarvis/` and `~/.local/share/omarvis/`. The terminal shows one line per phase; full subprocess output goes to `~/.local/share/omarvis/setup.log`. For automation, `omarvis-setup --yes` answers every prompt with yes (it then requires `ELEVENLABS_API_KEY` in the environment on a first run).
 
 ## 2. Paste your ElevenLabs key
 
-If `ELEVENLABS_API_KEY` is not set in your environment, setup asks for the key and writes it to `~/.config/omarchy/omarvis/api_key` with mode 600. That is the only thing you type.
+If no key is stored and `ELEVENLABS_API_KEY` is not set, setup explains how to create one and prompts for it:
+
+1. Sign in at [elevenlabs.io](https://elevenlabs.io) — any plan works; agent calls and dictation consume credits from your plan's quota.
+2. Click your profile (bottom-left) → **API Keys** → **Create API Key**.
+3. Leave it unrestricted, or restrict it to **Agents Platform / Conversational AI** (the voice agent) and **Speech to Text** (dictation). A monthly credit cap on the key is a good idea.
+4. Copy the key right away — ElevenLabs shows it only once.
+
+Setup validates the key against the ElevenLabs API at the prompt — a mistyped key, or one scoped without agents access, fails immediately with instructions instead of surfacing minutes later during provisioning. The key is stored in `~/.config/omarchy/omarvis/api_key` with mode 600 and sent only to `api.elevenlabs.io`. That is the only thing you type.
 
 Setup then offers the J-key bindings and appends any missing ones after making a timestamped backup:
 

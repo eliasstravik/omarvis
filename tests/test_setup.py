@@ -137,6 +137,50 @@ def test_setup_installs_native_panel_keybinding():
     assert 'missing_bindings+=("$PANEL_BINDING")' in script
 
 
+def test_setup_teaches_key_creation_and_validates_the_needed_scope():
+    script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
+
+    # The key prompt must carry its own instructions: where to create the
+    # key, which product scopes it needs, and that ElevenLabs shows it once.
+    assert "https://elevenlabs.io" in script
+    assert "API Keys" in script
+    assert "Agents Platform / Conversational AI" in script
+    assert "Speech to Text" in script
+    assert "ElevenLabs shows it only once" in script
+    # Validation exercises the exact scope provisioning needs (listing
+    # agents), so an under-scoped key fails at the prompt, not phases later.
+    assert "api.elevenlabs.io/v1/convai/agents" in script
+    assert "xi-api-key" in script
+    assert "missing_permissions" in script
+    assert "need_command curl" in script
+
+
+def test_setup_asks_everything_up_front_then_runs_unattended():
+    script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
+
+    # Every prompt precedes the first work phase, so the run never stalls
+    # waiting for input once the installing starts.
+    first_phase = script.index('phase 1 "')
+    for prompt_marker in (
+        'confirm "Dictation needs wtype.',
+        'read -r -s -p "ElevenLabs API key',
+        'confirm "Update the missing or outdated bindings',
+    ):
+        assert script.index(prompt_marker) < first_phase
+
+
+def test_setup_keeps_subprocess_noise_in_a_log():
+    script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
+
+    assert "setup.log" in script
+    assert 'pip" install -q' in script
+    # Failures must surface the hidden output, never swallow it.
+    assert "tail -n 20" in script
+    # Non-interactive parity and terminal etiquette.
+    assert "--yes" in script
+    assert "NO_COLOR" in script
+
+
 def test_setup_explains_remote_prerequisite_and_credential_risk():
     script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
 
