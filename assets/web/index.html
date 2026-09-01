@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <base href="./">
+  <title>Omarvis Remote</title>
+  <style>
+    /* OMARVIS_THEME */
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; margin: 0; }
+    body {
+      display: grid;
+      place-items: center;
+      min-height: 100dvh;
+      padding: max(22px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right))
+        max(22px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left));
+      overflow: hidden;
+      color: var(--omarvis-foreground);
+      background: var(--omarvis-background)
+        url("./background?k=OMARVIS_BACKGROUND_KEY") center / cover fixed;
+      font-family: ui-monospace, "Cascadia Code", "SFMono-Regular", monospace;
+    }
+    body::before {
+      position: fixed;
+      inset: 0;
+      content: "";
+      background: color-mix(in srgb, var(--omarvis-background) 76%, transparent);
+      backdrop-filter: blur(16px) saturate(.82);
+    }
+    button { font: inherit; }
+    main {
+      position: relative;
+      display: grid;
+      gap: 28px;
+      width: min(100%, 430px);
+      padding: 28px;
+      border: 1px solid color-mix(in srgb, var(--omarvis-border) 80%, transparent);
+      border-radius: 24px;
+      background: color-mix(in srgb, var(--omarvis-background) 88%, transparent);
+      box-shadow: 0 24px 80px color-mix(in srgb, var(--omarvis-background) 78%, transparent);
+    }
+    header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+    .brand { margin: 0; color: var(--omarvis-accent); font-size: 22px; line-height: 1; }
+    .machine { margin-top: 8px; font-size: 12px; opacity: .62; }
+    .secure {
+      padding: 5px 8px;
+      border: 1px solid color-mix(in srgb, var(--omarvis-accent) 42%, transparent);
+      border-radius: 99px;
+      color: var(--omarvis-accent);
+      font-size: 10px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .hud {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      overflow: hidden;
+      border: 1px solid var(--omarvis-border);
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--omarvis-background) 82%, transparent);
+    }
+    .meter { display: grid; gap: 8px; min-width: 0; padding: 17px; }
+    .meter + .meter { border-left: 1px solid var(--omarvis-border); }
+    .meter-label { font-size: 10px; letter-spacing: .14em; opacity: .58; }
+    .meter-state { display: flex; align-items: center; gap: 9px; font-size: 13px; }
+    .dot {
+      width: 10px;
+      height: 10px;
+      flex: none;
+      border: 1px solid currentColor;
+      border-radius: 50%;
+      color: var(--omarvis-border);
+      background: currentColor;
+      transition: color 160ms ease, box-shadow 160ms ease;
+    }
+    .dot.active {
+      color: var(--omarvis-accent);
+      box-shadow: 0 0 0 5px color-mix(in srgb, var(--omarvis-accent) 14%, transparent);
+    }
+    .talk {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      width: 100%;
+      min-height: 72px;
+      border: 1px solid color-mix(in srgb, var(--omarvis-accent) 72%, transparent);
+      border-radius: 18px;
+      color: var(--omarvis-background);
+      background: var(--omarvis-accent);
+      box-shadow: 0 12px 30px color-mix(in srgb, var(--omarvis-accent) 24%, transparent);
+      font-size: 18px;
+      font-weight: 700;
+      cursor: pointer;
+      touch-action: manipulation;
+      transition: transform 120ms ease, filter 120ms ease, opacity 120ms ease;
+    }
+    .talk:active { transform: scale(.985); }
+    .talk:disabled { cursor: wait; opacity: .62; }
+    .talk.end {
+      color: var(--omarvis-foreground);
+      border-color: var(--omarvis-border);
+      background: color-mix(in srgb, var(--omarvis-background) 76%, var(--omarvis-border));
+      box-shadow: none;
+    }
+    .talk-icon { width: 12px; height: 12px; border-radius: 50%; background: currentColor; }
+    .talk.end .talk-icon { border-radius: 2px; }
+    footer { min-height: 42px; text-align: center; }
+    .status { margin: 0; font-size: 12px; line-height: 1.55; opacity: .72; }
+    .repair {
+      display: none;
+      margin-top: 10px;
+      color: var(--omarvis-urgent);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .repair.visible { display: block; }
+    @media (max-width: 360px) {
+      main { gap: 22px; padding: 22px; }
+      .hud { grid-template-columns: 1fr; }
+      .meter + .meter { border-top: 1px solid var(--omarvis-border); border-left: 0; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1 class="brand">omarvis</h1>
+        <div class="machine" id="machine">computer</div>
+      </div>
+      <div class="secure">tailnet only</div>
+    </header>
+
+    <section class="hud" aria-label="Conversation status" aria-live="polite">
+      <div class="meter">
+        <span class="meter-label">MIC</span>
+        <span class="meter-state"><span class="dot" id="mic-dot"></span><span id="mic-state">ready</span></span>
+      </div>
+      <div class="meter">
+        <span class="meter-label">AGENT</span>
+        <span class="meter-state"><span class="dot" id="agent-dot"></span><span id="agent-state">idle</span></span>
+      </div>
+    </section>
+
+    <button class="talk" id="talk" type="button">
+      <span class="talk-icon" aria-hidden="true"></span>
+      <span id="talk-label">Talk</span>
+    </button>
+
+    <footer>
+      <p class="status" id="status">Starting here ends any live computer conversation.</p>
+      <p class="repair" id="repair">Pairing was rejected. Re-scan the QR from the Omarvis panel.</p>
+    </footer>
+  </main>
+
+  <script src="./vendor/elevenlabs-client-1.23.0.iife.js?k=OMARVIS_BACKGROUND_KEY"></script>
+  <script>
+    (() => {
+      "use strict";
+
+      const secret = new URLSearchParams(location.search).get("k") || "";
+      const elements = {
+        talk: document.getElementById("talk"),
+        talkLabel: document.getElementById("talk-label"),
+        status: document.getElementById("status"),
+        repair: document.getElementById("repair"),
+        micDot: document.getElementById("mic-dot"),
+        micState: document.getElementById("mic-state"),
+        agentDot: document.getElementById("agent-dot"),
+        agentState: document.getElementById("agent-state"),
+      };
+
+      document.getElementById("machine").textContent = location.hostname.split(".")[0] || "computer";
+
+      let conversation = null;
+      let eventStream = null;
+      let pingTimer = null;
+      let starting = false;
+      let ending = false;
+      let disconnectedDuringStart = false;
+      let expectedConversationId = "";
+      let transcriptChain = Promise.resolve();
+      let relayChain = Promise.resolve();
+      let runInFlight = false;
+      let bufferedSee = null;
+
+      class ApiError extends Error {
+        constructor(status, message) {
+          super(message);
+          this.name = "ApiError";
+          this.status = status;
+        }
+      }
+
+      function setStatus(text) {
+        elements.status.textContent = text;
+      }
+
+      function setRepair(visible) {
+        elements.repair.classList.toggle("visible", visible);
+      }
+
+      function setIdleUi() {
+        elements.talk.disabled = false;
+        elements.talk.classList.remove("end");
+        elements.talkLabel.textContent = "Talk";
+        elements.micDot.classList.remove("active");
+        elements.agentDot.classList.remove("active");
+        elements.micState.textContent = "ready";
+        elements.agentState.textContent = "idle";
+      }
+
+      function setLiveUi() {
+        elements.talk.disabled = false;
+        elements.talk.classList.add("end");
+        elements.talkLabel.textContent = "End";
+        elements.micDot.classList.add("active");
+        elements.micState.textContent = "listening";
+        elements.agentState.textContent = "listening";
+      }
+
+      async function post(path, payload = {}) {
+        const response = await fetch(path, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${secret}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        });
+        let body = {};
+        try {
+          body = await response.json();
+        } catch (_error) {
+          body = {};
+        }
+        if (!response.ok) {
+          if (response.status === 403) setRepair(true);
+          throw new ApiError(response.status, body.error || `Request failed (${response.status})`);
+        }
+        return body;
+      }
+
+      function queueTranscript(message) {
+        transcriptChain = transcriptChain
+          .then(() => post("./api/transcript", {text: message, final: true}))
+          .catch((error) => {
+            setStatus(`Transcript relay failed: ${error.message}`);
+          });
+      }
+
+      async function flushSeeReady() {
+        if (!bufferedSee || runInFlight || !conversation || ending) return;
+        const event = bufferedSee;
+        bufferedSee = null;
+        try {
+          await conversation.sendMultimodalMessage({
+            text: "Here is the current desktop screenshot. Describe what is visible and answer the user's question.",
+            fileId: event.file_id,
+          });
+        } catch (error) {
+          setStatus(`Screenshot delivery failed: ${error.message}`);
+        }
+      }
+
+      async function performRelay(parameters) {
+        runInFlight = true;
+        try {
+          const result = await post("./api/run", parameters || {});
+          return JSON.stringify(result);
+        } catch (error) {
+          // A 409 does not end phone audio. The terminal SSE event is authoritative.
+          return JSON.stringify({status: "error", error: error.message, http_status: error.status || 0});
+        } finally {
+          runInFlight = false;
+          // Promise callbacks carrying the tool result run before this timer, preserving
+          // result-first, screenshot-second protocol ordering across HTTP and SSE.
+          setTimeout(flushSeeReady, 0);
+        }
+      }
+
+      function relayRun(parameters) {
+        const task = relayChain.then(() => performRelay(parameters));
+        relayChain = task.catch(() => undefined);
+        return task;
+      }
+
+      function handleRemoteEvent(event) {
+        if (event.event === "context" && conversation && event.text) {
+          conversation.sendContextualUpdate(event.text);
+          return;
+        }
+        if (event.event === "see-ready" && event.file_id) {
+          if (bufferedSee) {
+            setStatus("A second screenshot arrived before the first was delivered.");
+            return;
+          }
+          bufferedSee = event;
+          if (!runInFlight) setTimeout(flushSeeReady, 0);
+          return;
+        }
+        if (event.event === "ended") {
+          void endConversation(`Session ended: ${event.reason || "computer ended it"}`, false);
+        }
+      }
+
+      function openEvents() {
+        return new Promise((resolve, reject) => {
+          let opened = false;
+          const stream = new EventSource(`./api/events?k=${encodeURIComponent(secret)}`);
+          eventStream = stream;
+          stream.onopen = () => {
+            opened = true;
+            resolve();
+          };
+          stream.onmessage = (message) => {
+            try {
+              handleRemoteEvent(JSON.parse(message.data));
+            } catch (_error) {
+              setStatus("The computer sent an unreadable event.");
+            }
+          };
+          stream.onerror = () => {
+            if (!opened) reject(new Error("Could not open the secure event stream."));
+            else if (!ending) setStatus("Reconnecting to the computer…");
+          };
+        });
+      }
+
+      function startPings() {
+        clearInterval(pingTimer);
+        pingTimer = setInterval(() => {
+          post("./api/ping").catch((error) => {
+            if (!ending) setStatus(`Computer link: ${error.message}`);
+          });
+        }, 5000);
+      }
+
+      async function endConversation(reason, notifyServer = true) {
+        if (ending) return;
+        ending = true;
+        clearInterval(pingTimer);
+        pingTimer = null;
+        if (eventStream) {
+          eventStream.close();
+          eventStream = null;
+        }
+        const active = conversation;
+        conversation = null;
+        if (active) {
+          try { await active.endSession(); } catch (_error) { /* already disconnected */ }
+        }
+        if (notifyServer) {
+          try { await post("./api/session/end"); } catch (_error) { /* lifeline is authoritative */ }
+        }
+        bufferedSee = null;
+        runInFlight = false;
+        expectedConversationId = "";
+        disconnectedDuringStart = false;
+        starting = false;
+        ending = false;
+        setIdleUi();
+        setStatus(reason);
+      }
+
+      async function startConversation() {
+        if (starting || conversation) return;
+        starting = true;
+        disconnectedDuringStart = false;
+        setRepair(false);
+        elements.talk.disabled = true;
+        elements.talkLabel.textContent = "Connecting…";
+        elements.micState.textContent = "requesting";
+        setStatus("Ending any computer conversation and preparing the microphone…");
+        try {
+          if (!secret) throw new ApiError(403, "Missing pairing key");
+          const token = await post("./api/token");
+          if (!token.local_ended) {
+            throw new Error("The computer conversation could not be stopped. Try again.");
+          }
+          if (!token.token || !token.conversation_id) {
+            throw new Error("The computer returned an incomplete conversation token.");
+          }
+          expectedConversationId = token.conversation_id;
+
+          // The stream must be attached before ElevenLabs can invoke the run tool.
+          await openEvents();
+
+          const started = await ElevenLabsClient.Conversation.startSession({
+            conversationToken: token.token,
+            connectionType: "webrtc",
+            dynamicVariables: token.dynamic_variables || {},
+            clientTools: {run: relayRun},
+            onConnect: ({conversationId}) => {
+              setStatus(`Connected · ${(conversationId || expectedConversationId).slice(0, 8)}`);
+              setLiveUi();
+            },
+            onDisconnect: () => {
+              if (starting && !conversation) {
+                disconnectedDuringStart = true;
+              } else if (!ending) {
+                void endConversation("Conversation disconnected.");
+              }
+            },
+            onError: (message) => {
+              setStatus(`Conversation error: ${message}`);
+            },
+            onMessage: ({role, message}) => {
+              if (role === "user" && message) queueTranscript(message);
+            },
+            onModeChange: ({mode}) => {
+              const speaking = mode === "speaking";
+              elements.agentDot.classList.toggle("active", speaking);
+              elements.agentState.textContent = speaking ? "speaking" : "listening";
+              elements.micDot.classList.toggle("active", !speaking);
+              elements.micState.textContent = speaking ? "paused" : "listening";
+            },
+            onStatusChange: ({status}) => {
+              if (status === "connecting") setStatus("Connecting to the agent…");
+            },
+          });
+
+          if (started.getId() !== expectedConversationId || disconnectedDuringStart) {
+            try { await started.endSession(); } catch (_error) { /* fail closed */ }
+            throw new Error(
+              disconnectedDuringStart
+                ? "Conversation disconnected while starting. Try again."
+                : "Conversation identity mismatch. Session closed."
+            );
+          }
+          conversation = started;
+          starting = false;
+          setLiveUi();
+          setStatus("Phone conversation active.");
+          startPings();
+        } catch (error) {
+          if (error.status === 403) setRepair(true);
+          if (eventStream) {
+            eventStream.close();
+            eventStream = null;
+          }
+          try { await post("./api/session/end"); } catch (_ignored) { /* no session is fine */ }
+          disconnectedDuringStart = false;
+          starting = false;
+          setIdleUi();
+          setStatus(error.message || "Could not start the phone conversation.");
+        }
+      }
+
+      elements.talk.addEventListener("click", () => {
+        if (conversation) void endConversation("Phone conversation ended.");
+        else void startConversation();
+      });
+
+      if (!secret) {
+        setRepair(true);
+        setStatus("This page needs the pairing link from the Omarvis panel.");
+      }
+    })();
+  </script>
+</body>
+</html>

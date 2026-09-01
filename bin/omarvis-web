@@ -1,0 +1,8 @@
+#!/bin/bash
+
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONUNBUFFERED=1
+export PATH="$PATH:/usr/share/omarchy/bin"
+
+cd "$(dirname "$0")/.." || exit
+exec "${OMARVIS_VENV:-$HOME/.local/share/omarvis/venv}/bin/python" -u -m omarvis.web "$@"

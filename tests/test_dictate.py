@@ -1,3 +1,4 @@
+import subprocess
 import sys
 from array import array
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from omarvis.dictate import (
     AudioRecorder,
     DictationService,
     clean_transcript,
+    copy_to_clipboard,
     inject_text,
     scribe_transcriber,
     text_chunks,
@@ -53,6 +55,127 @@ def test_wtype_injection_is_direct_chunked_and_has_no_newline():
     ]
     assert all("\n" not in call[0][-1] for call in calls)
     assert all(call[1]["check"] is True for call in calls)
+
+
+def test_clipboard_copy_uses_safe_argv_and_detaches_all_streams():
+    calls = []
+
+    def runner(argv, **options):
+        calls.append((argv, options))
+
+    copy_to_clipboard("--literal $HOME", runner=runner)
+
+    assert calls == [
+        (
+            ["wl-copy", "--", "--literal $HOME"],
+            {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+                "timeout": 5,
+                "check": False,
+            },
+        )
+    ]
+
+
+def test_clipboard_failure_never_prevents_injection(monkeypatch):
+    injected = []
+    monkeypatch.setattr(
+        "omarvis.dictate.subprocess.run",
+        lambda *_args, **_options: (_ for _ in ()).throw(OSError("no clipboard")),
+    )
+    service = DictationService(
+        recorder=_PcmRecorder(),
+        transcriber=lambda _audio: "still type this",
+        injector=injected.append,
+        tap_discard_seconds=0.0,
+    )
+
+    service.start()
+    service.stop()
+    service.wait()
+
+    assert injected == ["still type this"]
+    assert service.state == "idle"
+
+
+def test_injector_failure_keeps_transcript_and_emits_one_idle(monkeypatch):
+    events = []
+    sounds = []
+    clipboard = []
+    monkeypatch.setattr(
+        "omarvis.dictate.subprocess.run",
+        lambda argv, **options: clipboard.append((argv, options)),
+    )
+    service = DictationService(
+        recorder=_PcmRecorder(),
+        transcriber=lambda _audio: "recoverable words",
+        injector=lambda _text: (_ for _ in ()).throw(RuntimeError("wtype failed")),
+        event_sink=events.append,
+        earcons_enabled=True,
+        sound_player=lambda name, *, enabled: sounds.append((name, enabled)),
+        tap_discard_seconds=0.0,
+    )
+
+    service.start()
+    service.stop()
+    service.wait()
+
+    assert clipboard[0][0] == ["wl-copy", "--", "recoverable words"]
+    assert {
+        "event": "dictation",
+        "state": "error",
+        "message": "wtype failed",
+        "text": "recoverable words",
+    } in events
+    assert sum(event.get("state") == "idle" for event in events) == 1
+    assert sounds == [
+        ("mic-open", True),
+        ("mic-close", True),
+        ("error", True),
+    ]
+    assert service.state == "idle"
+
+
+@pytest.mark.parametrize(
+    "audio, transcription, message",
+    [
+        (b"", "unused", "No audio was captured"),
+        (b"pcm", "", "No speech was detected"),
+    ],
+)
+def test_pre_transcript_failures_do_not_touch_clipboard(
+    monkeypatch, audio, transcription, message
+):
+    events = []
+    clipboard = []
+    monkeypatch.setattr(
+        "omarvis.dictate.subprocess.run",
+        lambda *args, **options: clipboard.append((args, options)),
+    )
+
+    class Recorder:
+        def start(self):
+            pass
+
+        def stop(self):
+            return audio
+
+    service = DictationService(
+        recorder=Recorder(),
+        transcriber=lambda _audio: transcription,
+        injector=lambda _text: None,
+        event_sink=events.append,
+        tap_discard_seconds=0.0,
+    )
+
+    service.start()
+    service.stop()
+    service.wait()
+
+    assert clipboard == []
+    assert any(event.get("message") == message for event in events)
+    assert service.state == "idle"
 
 
 def test_dictation_service_records_transcribes_cleans_and_injects():

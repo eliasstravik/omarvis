@@ -41,7 +41,7 @@ def test_service_routes_handsfree_and_cancel_and_manages_keybind_marker():
     assert "omarchy-shell omarvis esc" in service
     assert 'hl.unbind(\\"ESCAPE\\")' in service
     assert "onDictationStateChanged: updateDictationMarker()" in service
-    assert "onEscapeLiveChanged: updateEscapeBind()" in service
+    assert "onEscapeBindWantedChanged: updateEscapeBind()" in service
 
 
 def test_escape_ends_whatever_is_live_with_dictation_first():
@@ -65,6 +65,7 @@ def test_errors_are_routed_to_the_notification_server():
     assert "onLastErrorChanged: if (lastError) notifyError(lastError)" in service
     assert '"omarchy-notification-send"' in service
     assert '"Omarvis voice error"' in service
+    assert 'message + "\\nDictation was copied to clipboard."' in service
 
 
 def test_service_tracks_hands_free_dictation_lock():
@@ -74,3 +75,49 @@ def test_service_tracks_hands_free_dictation_lock():
     assert "root.dictationLocked = !!event.locked" in service
     assert 'if (nextState !== "recording") root.dictationLocked = false' in service
     assert "dictationLocked: root.dictationLocked" in service
+
+
+def test_panel_ipc_and_escape_precedence_are_service_owned():
+    service = (Path(__file__).parent.parent / "Service.qml").read_text()
+
+    assert "property bool panelOpen: false" in service
+    assert "signal panelRequested()" in service
+    assert 'escapeBindWanted: escapeLive && !panelOpen' in service
+    assert "if (root.escapeBindWanted)" in service
+    assert 'function panel(): string { root.panelRequested(); return "opening" }' in service
+
+
+def test_phone_state_is_separate_from_local_hud_state():
+    service = (Path(__file__).parent.parent / "Service.qml").read_text()
+
+    for declaration in (
+        'property bool remoteEnabled: false',
+        'property string remoteState: "off"',
+        'property string remoteError: ""',
+        'property string remoteUrl: ""',
+        'property var qrMatrix: []',
+        'property bool phoneSessionActive: false',
+        'property string phoneRunningCommand: ""',
+    ):
+        assert declaration in service
+    assert 'escapeLive: dictationState === "recording"' in service
+    escape_live = service.split("readonly property bool escapeLive", 1)[1].split("readonly property bool escapeBindWanted", 1)[0]
+    assert "phoneSessionActive" not in escape_live
+
+
+def test_remote_daemon_is_supervised_and_marker_is_direction_of_truth():
+    service = (Path(__file__).parent.parent / "Service.qml").read_text()
+
+    for expected in (
+        'command: [root.pluginDir + "/bin/omarvis-web"]',
+        'command: [root.pluginDir + "/bin/omarvis-web", "--cleanup"]',
+        'webDaemon.write("end-session\\n")',
+        'webDaemon.write("ack-local-ended\\n")',
+        "if (exitCode === 3)",
+        "webRestart.restart()",
+        'path: Quickshell.env("HOME") + "/.local/share/omarvis/remote-enabled"',
+        "onFileChanged: reload()",
+        "function setRemote(enabled: bool): string { return root.setRemoteEnabled(enabled) }",
+        'return "retrying"',
+    ):
+        assert expected in service
