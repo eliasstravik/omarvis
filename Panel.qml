@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import Quickshell
 import qs.Ui
@@ -268,11 +269,12 @@ Panel {
             model: root.svc ? root.svc.keybindings : []
 
             Row {
+              id: keybindingRow
               required property var modelData
               width: parent.width
 
               Text {
-                text: modelData.label
+                text: keybindingRow.modelData.label
                 color: root.foreground
                 opacity: 0.6
                 font.family: root.fontFamily
@@ -285,7 +287,7 @@ Panel {
               }
 
               Text {
-                text: modelData.keys
+                text: keybindingRow.modelData.keys
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
