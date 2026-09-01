@@ -49,6 +49,24 @@ def inject_text(
         )
 
 
+def copy_to_clipboard(
+    text: str,
+    *,
+    runner: Callable[..., Any] | None = None,
+) -> None:
+    """Copy a transcript without letting clipboard ownership block dictation."""
+    try:
+        (runner or subprocess.run)(
+            ["wl-copy", "--", text],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001 - clipboard history must never break typing
+        pass
+
+
 class AudioRecorder:
     def __init__(
         self,
@@ -309,7 +327,16 @@ class DictationService:
             )
             if not transcript:
                 raise RuntimeError("No speech was detected")
-            self.injector(transcript)
+            copy_to_clipboard(transcript)
+            try:
+                self.injector(transcript)
+            except Exception as error:
+                with self._lock:
+                    self._emit("error", message=str(error), text=transcript)
+                self._play("error")
+                with self._lock:
+                    self._emit("idle")
+                return
             with self._lock:
                 self._emit("idle", text=transcript)
         except Exception as error:

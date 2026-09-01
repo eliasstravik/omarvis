@@ -598,6 +598,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "voice_id": "JSWO6cw2AyFE324d5kEr",
     "input_device_index": None,
     "herdr_announcements": True,
+    "web_port": 4763,
     "browser_mode": "unavailable",
     "agent_browser_path": "agent-browser",
     "screenshot_cache_max_age_seconds": 86_400,

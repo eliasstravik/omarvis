@@ -46,7 +46,6 @@ BarWidget {
     var text = root.dictationState !== "idle"
       ? "dictation: " + root.dictationState + (root.dictationLocked ? " (hands-free)" : "")
       : root.currentMode + ": " + root.sessionState
-    if (root.svc && root.svc.lastDictation) text += "\nDictated: " + root.svc.lastDictation
     if (root.svc && root.svc.lastUser) text += "\nYou: " + root.svc.lastUser
     if (root.svc && root.svc.lastAgent) text += "\nOmarvis: " + root.svc.lastAgent
     if (root.svc && root.svc.runningCommand) text += "\nRunning: " + root.svc.runningCommand

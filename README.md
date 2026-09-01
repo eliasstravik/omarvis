@@ -11,8 +11,9 @@ The plugin exposes one client tool named `run`. Python policy code parses every 
 - Chromium (or Chrome) with an existing profile for browser control with your logins
 - Herdr for terminal and coding-agent control
 - `wtype` for direct Wayland dictation input
+- Tailscale on the computer and phone for optional remote control
 
-The setup script installs PortAudio, PyAudio, the ElevenLabs Python SDK, and agent-browser 0.34. It creates runtime files under `~/.config/omarchy/omarvis/` and `~/.local/share/omarvis/`. It does not edit this plugin checkout.
+The setup script installs PortAudio, PyAudio, the ElevenLabs Python SDK, QR matrix support, and agent-browser 0.34. It creates runtime files under `~/.config/omarchy/omarvis/` and `~/.local/share/omarvis/`. It does not edit this plugin checkout.
 
 ## Install
 
@@ -34,9 +35,32 @@ hl.unbind("SUPER + J") -- replaces Omarchy's Toggle window split binding where p
 o.bind("SUPER + J", "Omarvis Dictate", "omarchy-shell omarvis dictate start")
 o.bind("SUPER + J", "Omarvis Dictate Stop", "omarchy-shell omarvis dictate stop", { release = true })
 o.bind("SUPER + ALT + J", "Omarvis Text", "<plugin-dir>/bin/omarvis-text")
+o.bind("SUPER + CTRL + ALT + J", "Omarvis Panel", "omarchy-shell omarvis panel")
 ```
 
-`SUPER + CTRL + J` starts the full Agent scope. `SUPER + SHIFT + J` starts the strictly read-only Ask scope. Hold `SUPER + J` to dictate your own words into the focused window, or use `SUPER + ALT + J` for a typed one-shot Agent instruction. Clicking the bar microphone toggles Agent mode.
+`SUPER + CTRL + J` starts the full Agent scope. `SUPER + SHIFT + J` starts the strictly read-only Ask scope. Hold `SUPER + J` to dictate your own words into the focused window, or use `SUPER + ALT + J` for a typed one-shot Agent instruction. Left-click the bar microphone, or press `SUPER + CTRL + ALT + J`, to open the Omarvis panel. Right-click is intentionally inert.
+
+## Panel
+
+The native Omarchy panel shows live mode and status, Agent/Ask start controls, and the latest voice exchange. Its short hover tooltip retains mode and state while the full detail lives in the panel. Dictation history deliberately does not appear in Omarvis: every successful transcript goes to the Wayland clipboard, and Omarchy's clipboard manager is the sole history UI. The REMOTE section controls the tailnet-only web service and shows its URL and QR code when serving.
+
+The panel uses the existing `omarvis.voice` module id and the existing `entryPoints.barWidget` manifest key, so upgrading from the former click-to-toggle widget requires no `shell.json` migration. Opening another stock panel closes Omarvis through Omarchy's normal one-popup coordinator.
+
+## Remote control from your phone
+
+Remote access uses a path-scoped `tailscale serve` mount at `/omarvis`; Omarvis never enables Funnel or changes Tailscale login/network settings. Turn it on in the panel, then scan the QR from a phone signed into the same tailnet account. The authenticated phone page matches the active Omarchy theme and wallpaper. Tap **Talk** to start a phone WebRTC conversation; this ends any live computer conversation, while starting again on the computer ends the phone session.
+
+**Whoever holds this URL, or photographs the QR, can install software and run terminal commands on this machine.** The remote transcript stream cannot provide a physical proof of who spoke, so confirmation-gated actions—including `herdr pane run`, package or plugin installation, power actions, deletes, browser uploads, and browser downloads—remain reachable to the authenticated remote caller.
+
+The URL is available only inside the tailnet, never through Funnel or the public internet. Exposure therefore includes other enrolled devices, machines shared into the tailnet, processes running on any of them, and anyone who sees the QR. On ordinary user-owned Tailscale nodes, Omarvis also requires the identity header supplied by Tailscale Serve to match the computer's tailnet login. This narrows access but does not make the URL safe to share.
+
+The pairing URL is stable and deliberately remains in the phone browser's address bar. The credential may enter browser history and, on iOS or Chrome, may sync to a cloud account and other devices. It is stored in `~/.local/share/omarvis/web-secret` with mode 600 and does not rotate when Remote access is toggled off. Delete that file while Remote access is off to revoke it and generate a new QR on the next enable. Clicking the URL row copies the full credential into Omarchy's persistent, browsable clipboard history—the same history used for dictations—so scanning the QR is preferred.
+
+Remote access persists across reboots and re-arms at login. A stale Tailscale mount after a hard kill or power loss normally points at nothing, but it could proxy to an unrelated process if that process later binds Omarvis's port. Omarvis removes its own stale mount at shell startup and never removes other Serve configuration.
+
+The backend listens only on `127.0.0.1`. Change its port with `"web_port": 4763` in `~/.config/omarchy/omarvis/config.json` if the default is occupied. `bin/omarvis-web --simulate` provides a fake URL, real QR matrix, theme/page rendering, a no-op policy executor, and a short SSE timeline without touching Tailscale. Simulation does not mint an ElevenLabs token and does not simulate phone audio, browser client tools, transcripts, or screenshots.
+
+Phone conversation audio flows directly between the phone and ElevenLabs over WebRTC; the API key remains on the computer. The computer receives only final transcript text and relayed tool calls. Remote sessions always use Agent scope. They can drive `real-profile` browser windows containing snapshots of your live logins, and an explicit remote `omarvis see` uploads a current desktop screenshot to ElevenLabs. Sessions are capped at five minutes, and a locked or suspended phone normally loses its lifeline and is ended by the computer after about 15 seconds.
 
 ## Session HUD
 
