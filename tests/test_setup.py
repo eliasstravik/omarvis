@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -106,7 +107,8 @@ def test_setup_defaults_the_agent_to_the_omarvis_voice():
 def test_setup_pins_metered_audio_sdk_and_preserves_ui_defaults():
     script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
 
-    assert '"elevenlabs==2.65.0"' in script
+    # The SDK pin moved into the hash lock's top-level input.
+    assert "elevenlabs==2.65.0" in (ROOT / "requirements.in").read_text()
     # Sounds are gone for good: no earcons default, and setup prunes the
     # stale key from existing configs.
     assert "del(.earcons)" in script
@@ -117,8 +119,8 @@ def test_setup_pins_metered_audio_sdk_and_preserves_ui_defaults():
 def test_setup_installs_qrcode_without_pillow_and_sets_web_port():
     script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
 
-    assert '"qrcode==8.2"' in script
-    assert "Pillow" not in script
+    assert "qrcode==8.2" in (ROOT / "requirements.in").read_text()
+    assert "pillow" not in (ROOT / "requirements.lock").read_text().lower()
     assert "web_port: (.web_port // 4763)" in script
 
 
@@ -222,3 +224,34 @@ def test_readme_headlines_remote_risk_and_data_flows():
     assert "nothing is written back" in readme
     assert "screenshot is uploaded only when you explicitly ask" in readme
     assert "nothing is sent while idle" in readme
+
+
+def test_setup_installs_only_locked_verified_artifacts():
+    # The marketplace review binds runtime authorization to the reviewed
+    # commit, so every registry artifact setup fetches must be exactly
+    # pinned and hash-verified by files in this repository.
+    script = (ROOT / "bin" / "omarvis-setup").read_text(encoding="utf-8")
+
+    # Python: the venv is built from the full transitive lock, and pip
+    # refuses any artifact whose sha256 is not recorded there.
+    assert "--require-hashes" in script
+    assert 'requirements.lock"' in script
+    lock = (ROOT / "requirements.lock").read_text(encoding="utf-8")
+    pins = [
+        line for line in lock.splitlines()
+        if "==" in line and not line.startswith(("#", " ", "\t"))
+    ]
+    assert any(line.startswith("elevenlabs==2.65.0") for line in pins)
+    assert any(line.startswith("qrcode==8.2") for line in pins)
+    assert lock.count("--hash=sha256:") >= len(pins)
+
+    # npm: agent-browser comes from the committed integrity lock via npm ci
+    # into the plugin's own state dir — never a mutable global install.
+    assert "npm install -g" not in script
+    assert "npm ci" in script
+    pkg = json.loads((ROOT / "npm" / "package.json").read_text(encoding="utf-8"))
+    npm_lock = json.loads((ROOT / "npm" / "package-lock.json").read_text(encoding="utf-8"))
+    assert pkg["dependencies"]["agent-browser"] == "0.34.0"
+    locked = npm_lock["packages"]["node_modules/agent-browser"]
+    assert locked["version"] == "0.34.0"
+    assert locked["integrity"].startswith("sha512-")

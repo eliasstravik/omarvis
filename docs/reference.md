@@ -13,7 +13,16 @@ The plugin exposes one client tool named `run`. Python policy code parses every 
 - `wtype` for direct Wayland dictation input
 - Tailscale on the computer and phone for optional remote control
 
-The setup script installs PortAudio, PyAudio, the ElevenLabs Python SDK, QR matrix support, and agent-browser 0.34. It creates runtime files under `~/.config/omarchy/omarvis/` and `~/.local/share/omarvis/`. It does not edit this plugin checkout.
+The setup script installs PortAudio, PyAudio, the ElevenLabs Python SDK, QR matrix support, and agent-browser 0.34.0. It creates runtime files under `~/.config/omarchy/omarvis/` and `~/.local/share/omarvis/`. It does not edit this plugin checkout.
+
+### Reproducible install
+
+Every artifact setup fetches is pinned in this repository, so the plugin commit under review fully determines the code that runs:
+
+- **Python runtime** — `requirements.lock` is a complete transitive lock (pip-compile, every package with sha256 wheel hashes). Setup installs it into `~/.local/share/omarvis/venv` with `pip install --require-hashes --ignore-installed`, which refuses any artifact whose hash is not in the lock. Top-level pins live in `requirements.in`.
+- **agent-browser** — `npm/package.json` plus `npm/package-lock.json` pin agent-browser 0.34.0 exactly, with its registry integrity hash. Setup runs `npm ci` from that lockfile into `~/.local/share/omarvis/agent-browser/` and uses only that copy; nothing is installed globally and a global agent-browser, if present, is never used or modified.
+- **ElevenLabs browser client** — the phone page's SDK (`@elevenlabs/client` 1.23.0 `dist/lib.iife.js`) is downloaded from the npm registry and verified against the sha256 hardcoded in `bin/omarvis-setup` before it is installed; on mismatch nothing is installed.
+- **System packages** — `portaudio`, `python-pyaudio`, and optionally `wtype` come from the distribution's signed repositories via `omarchy pkg add`; their versions follow the distribution, not this plugin.
 
 ## Install
 

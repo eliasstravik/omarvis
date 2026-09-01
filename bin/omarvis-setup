@@ -130,10 +130,20 @@ fi
 
 HAVE_WTYPE=false
 command -v wtype >/dev/null 2>&1 && HAVE_WTYPE=true
-AGENT_BROWSER_PATH=$(command -v agent-browser || true)
+# Omarvis provisions its own agent-browser from the committed lockfile
+# (npm/package-lock.json, npm ci verifies integrity hashes) instead of a
+# mutable global install, so the reviewed plugin commit fully determines the
+# code that runs. A user's own global agent-browser is never touched or used.
+AGENT_BROWSER_DIR="$STATE_DIR/agent-browser"
+AGENT_BROWSER_PATH="$AGENT_BROWSER_DIR/node_modules/.bin/agent-browser"
 WILL_INSTALL_AGENT_BROWSER=false
-if [[ -z $AGENT_BROWSER_PATH ]] && command -v npm >/dev/null 2>&1; then
-  WILL_INSTALL_AGENT_BROWSER=true
+if command -v npm >/dev/null 2>&1; then
+  if [[ ! -x $AGENT_BROWSER_PATH ]] \
+    || ! cmp -s "$PLUGIN_DIR/npm/package-lock.json" "$AGENT_BROWSER_DIR/package-lock.json"; then
+    WILL_INSTALL_AGENT_BROWSER=true
+  fi
+elif [[ ! -x $AGENT_BROWSER_PATH ]]; then
+  AGENT_BROWSER_PATH=""
 fi
 
 BROWSER_EXECUTABLE=""
@@ -146,7 +156,7 @@ done
 
 BROWSER_MODE="unavailable"
 NEEDS_MANAGED_BROWSER=false
-if [[ -n $AGENT_BROWSER_PATH || $WILL_INSTALL_AGENT_BROWSER == true ]]; then
+if [[ -x $AGENT_BROWSER_PATH || $WILL_INSTALL_AGENT_BROWSER == true ]]; then
   if [[ -n $BROWSER_EXECUTABLE ]] && [[ -d $HOME/.config/chromium/Default || -d $HOME/.config/google-chrome/Default ]]; then
     BROWSER_MODE="real-profile"
   else
@@ -170,7 +180,7 @@ fi
 echo
 echo "This run will:"
 note "• install packages: portaudio python-pyaudio"
-[[ $WILL_INSTALL_AGENT_BROWSER == true ]] && note "• install agent-browser 0.34 via npm"
+[[ $WILL_INSTALL_AGENT_BROWSER == true ]] && note "• install Omarvis's own agent-browser 0.34.0 under ~/.local/share/omarvis (npm ci from the committed lockfile)"
 [[ $NEEDS_MANAGED_BROWSER == true ]] && note "• install agent-browser's managed browser (no Chromium found)"
 note "• create a Python environment in ~/.local/share/omarvis/venv"
 note "• create or update the \"Omarvis\" agent in your ElevenLabs account"
@@ -331,11 +341,14 @@ if [[ $INSTALL_WTYPE == true ]]; then
   run_logged "omarchy pkg add wtype" omarchy pkg add wtype
 fi
 if [[ $WILL_INSTALL_AGENT_BROWSER == true ]]; then
-  run_logged "npm install -g agent-browser@0.34" npm install -g agent-browser@0.34
-  AGENT_BROWSER_PATH=$(command -v agent-browser || true)
+  install -d "$AGENT_BROWSER_DIR"
+  install -m 644 "$PLUGIN_DIR/npm/package.json" "$AGENT_BROWSER_DIR/package.json"
+  install -m 644 "$PLUGIN_DIR/npm/package-lock.json" "$AGENT_BROWSER_DIR/package-lock.json"
+  run_logged "npm ci agent-browser (integrity-checked from the committed lockfile)" \
+    npm ci --prefix "$AGENT_BROWSER_DIR" --omit=dev --no-audit --no-fund
 fi
-if [[ $NEEDS_MANAGED_BROWSER == true && -n $AGENT_BROWSER_PATH ]]; then
-  run_logged "agent-browser install (managed browser)" agent-browser install
+if [[ $NEEDS_MANAGED_BROWSER == true && -x $AGENT_BROWSER_PATH ]]; then
+  run_logged "agent-browser install (managed browser)" "$AGENT_BROWSER_PATH" install
 fi
 if [[ -f "$VENDOR_DIR/$ELEVENLABS_CLIENT_FILE" ]] \
   && printf '%s  %s\n' "$ELEVENLABS_CLIENT_SHA256" "$VENDOR_DIR/$ELEVENLABS_CLIENT_FILE" \
@@ -359,7 +372,8 @@ fi
 
 phase 2 "Creating the Python environment"
 run_logged "python -m venv $VENV_DIR" python -m venv --system-site-packages "$VENV_DIR"
-run_logged "pip install elevenlabs qrcode" "$VENV_DIR/bin/pip" install -q "elevenlabs==2.65.0" "qrcode==8.2"
+run_logged "pip install --require-hashes -r requirements.lock" \
+  "$VENV_DIR/bin/pip" install -q --require-hashes --ignore-installed -r "$PLUGIN_DIR/requirements.lock"
 
 phase 3 "Writing configuration"
 install -d -m 700 "$CONFIG_DIR"

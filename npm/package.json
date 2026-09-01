@@ -1,0 +1,8 @@
+{
+  "name": "omarvis-agent-browser",
+  "private": true,
+  "description": "Pinned, integrity-locked agent-browser install for Omarvis; provisioned by omarvis-setup via npm ci.",
+  "dependencies": {
+    "agent-browser": "0.34.0"
+  }
+}
