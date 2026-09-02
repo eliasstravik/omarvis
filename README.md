@@ -90,6 +90,10 @@ The plugin is free and MIT licensed. ElevenLabs bills Agents sessions by convers
 
 During a session: your microphone audio, your profile memory, the command catalogs, and your window titles, workspace number, Herdr agent names, and browser tab titles and hosts. A desktop screenshot is uploaded only when you explicitly ask about your screen. Nothing is sent while idle.
 
+### What does setup install?
+
+Two distro packages through `omarchy pkg add` (`portaudio` and `python-pyaudio`, plus `wtype` for dictation), a private Python virtualenv from a hash-locked `requirements.lock`, Omarvis's own copy of `agent-browser` 0.34.0 from a committed npm lockfile, and the sha256-pinned ElevenLabs browser client. Everything lands under `~/.local/share/omarvis` and `~/.config/omarchy/omarvis`. Remote access additionally needs Tailscale, which you install and sign in to yourself. The [reference](docs/reference.md#reproducible-install) lists every artifact and how it is verified.
+
 ### How do I uninstall it?
 
 Run `omarchy plugin remove io.github.eliasstravik.omarvis` and delete the two runtime directories. Setup never touched your keybindings without asking and kept a timestamped backup. The [getting-started guide](docs/getting-started.md#uninstall) has the exact steps.

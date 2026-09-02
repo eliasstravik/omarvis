@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
+from .privatefiles import PrivateFileError, read_private_path, write_private_path
+from .process import execute_process
 
 
 @dataclass(frozen=True)
@@ -163,15 +165,56 @@ def compact_herdr_agents(payload: Mapping[str, Any], *, limit: int = 30) -> list
     return lines
 
 
+# `omarchy commands --json` is a few hundred kilobytes; everything else the
+# catalog asks for is far smaller.
+CATALOG_STDOUT_LIMIT = 2 * 1024 * 1024
+CACHE_FILE_LIMIT = 4 * 1024 * 1024
+
+
+def _read_cache(path: Path) -> str | None:
+    """Return a cache file's text, or None when it is absent, odd, or corrupt."""
+    try:
+        raw = read_private_path(path, limit=CACHE_FILE_LIMIT, private=False)
+    except PrivateFileError:
+        return None
+    if not raw:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _read_json_cache(path: Path) -> Any:
+    text = _read_cache(path)
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _write_cache(path: Path, text: str) -> None:
+    """Publish a cache file atomically so a crash never leaves a corrupt one."""
+    try:
+        write_private_path(path, text.encode("utf-8"), mode=0o644)
+    except (OSError, PrivateFileError):
+        pass
+
+
 def _default_runner(argv: Sequence[str], timeout: float) -> CommandOutput:
-    completed = subprocess.run(
+    result = execute_process(
         list(argv),
-        capture_output=True,
-        text=True,
         timeout=timeout,
-        check=False,
+        kill_on_timeout=True,
+        stdout_limit=CATALOG_STDOUT_LIMIT,
     )
-    return CommandOutput(completed.returncode, completed.stdout, completed.stderr)
+    if result.timed_out:
+        raise subprocess.TimeoutExpired(list(argv), timeout)
+    if result.truncated or result.overflowed:
+        return CommandOutput(1, "", "output exceeded the catalog limit")
+    return CommandOutput(result.exit_code or 0, result.stdout, result.stderr)
 
 
 def _run_json(
@@ -285,8 +328,9 @@ def load_catalog(
         except (OSError, subprocess.SubprocessError):
             version = "fixture"
     cache_path = cache_root / f"catalog-{_cache_key(version)}.json"
-    if cache_path.exists():
-        return catalog_from_data(json.loads(cache_path.read_text()))
+    cached = _read_json_cache(cache_path)
+    if isinstance(cached, Mapping):
+        return catalog_from_data(cached)
     try:
         output = runner(("omarchy", "commands", "--json"), 5.0)
         if output.returncode != 0:
@@ -302,8 +346,7 @@ def load_catalog(
         if not fixture.exists():
             raise
         payload = json.loads(fixture.read_text())
-    cache_root.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(json.dumps(payload, ensure_ascii=False))
+    _write_cache(cache_path, json.dumps(payload, ensure_ascii=False))
     return catalog_from_data(payload)
 
 
@@ -361,8 +404,9 @@ def load_herdr_skill(
     )
     cache_root = cache_dir or Path.home() / ".cache" / "omarvis"
     cache_path = cache_root / f"herdr-skill-{_cache_key(version)}.md"
-    if cache_path.exists():
-        return cache_path.read_text()
+    cached_skill = _read_cache(cache_path)
+    if cached_skill:
+        return cached_skill
     try:
         output = runner(("herdr", "--skill"), 3.0)
     except (OSError, subprocess.SubprocessError):
@@ -370,8 +414,7 @@ def load_herdr_skill(
     if output.returncode != 0 or not output.stdout.strip():
         return ""
     adapted = _adapt_herdr_skill(output.stdout)
-    cache_root.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(adapted)
+    _write_cache(cache_path, adapted)
     return adapted
 
 HYPR_DISPATCHER_DOCS = {
@@ -562,8 +605,9 @@ def load_herdr_catalog(
         version = "unknown"
     cache_root = cache_dir or Path.home() / ".cache" / "omarvis"
     cache_path = cache_root / f"herdr-catalog-{_cache_key(version)}.json"
-    if cache_path.exists():
-        return herdr_catalog_from_help(json.loads(cache_path.read_text()))
+    cached_help = _read_json_cache(cache_path)
+    if isinstance(cached_help, Mapping):
+        return herdr_catalog_from_help(cached_help)
     help_by_group: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=len(HERDR_GROUPS)) as executor:
         futures = {
@@ -578,8 +622,7 @@ def load_herdr_catalog(
                 continue
             if output.returncode == 0:
                 help_by_group[group] = output.stdout
-    cache_root.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(json.dumps(help_by_group, ensure_ascii=False))
+    _write_cache(cache_path, json.dumps(help_by_group, ensure_ascii=False))
     return herdr_catalog_from_help(help_by_group)
 
 

@@ -428,3 +428,25 @@ def test_herdr_skill_is_empty_without_herdr(tmp_path):
         raise OSError("no herdr")
 
     assert load_herdr_skill(runner=runner, cache_dir=tmp_path) == ""
+
+
+def test_load_catalog_ignores_empty_or_corrupt_cache(tmp_path):
+    from omarvis.catalog import load_catalog
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    (cache_dir / "catalog-4.0.1.json").write_text("")
+    calls = []
+
+    def runner(argv, timeout):
+        calls.append(tuple(argv))
+        if tuple(argv) == ("omarchy", "commands", "--json"):
+            return CommandOutput(0, '{"commands": []}', "")
+        return CommandOutput(0, "", "")
+
+    catalog = load_catalog(runner=runner, cache_dir=cache_dir, version="4.0.1")
+
+    assert catalog is not None
+    assert ("omarchy", "commands", "--json") in calls
+    assert (cache_dir / "catalog-4.0.1.json").read_text() == '{"commands": []}'
+    assert not [p for p in cache_dir.iterdir() if p.name.endswith(".tmp")]

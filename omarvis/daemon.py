@@ -32,15 +32,14 @@ from .policy import (
     decide,
 )
 from .levels import LevelThrottle, rms_level
+from .privatefiles import (
+    MAX_CONFIG_BYTES,
+    MAX_SECRET_BYTES,
+    PrivateFileError,
+    read_private_path,
+)
+from .process import ExecutionResult, ProcessSupervisor, execute_process
 
-
-@dataclass(frozen=True)
-class ExecutionResult:
-    exit_code: int | None
-    stdout: str = ""
-    stderr: str = ""
-    timed_out: bool = False
-    started: bool = False
 
 
 @dataclass(frozen=True)
@@ -70,46 +69,6 @@ def compact_browser_tabs(raw_payload: str, *, limit: int = 15) -> str:
         host = urlsplit(str(tab.get("url") or "")).hostname or "unknown-host"
         lines.append(f"{tab_id} {title} {host}")
     return "Browser tabs: " + ("; ".join(lines) if lines else "none")
-
-
-def _reap_process(process: subprocess.Popen[str]) -> None:
-    try:
-        process.communicate()
-    except OSError:
-        pass
-
-
-def execute_process(
-    argv: Sequence[str],
-    *,
-    timeout: float,
-    kill_on_timeout: bool,
-    stdout_limit: int,
-    env: Mapping[str, str] | None = None,
-) -> ExecutionResult:
-    process = subprocess.Popen(
-        list(argv),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-        env=dict(env) if env is not None else None,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-        return ExecutionResult(process.returncode, stdout[:stdout_limit], stderr[:200])
-    except subprocess.TimeoutExpired:
-        if kill_on_timeout:
-            process.kill()
-            stdout, stderr = process.communicate()
-            return ExecutionResult(
-                process.returncode,
-                stdout[:stdout_limit],
-                stderr[:200],
-                timed_out=True,
-            )
-        threading.Thread(target=_reap_process, args=(process,), daemon=True).start()
-        return ExecutionResult(None, started=True)
 
 
 class RunToolHandler:
@@ -148,6 +107,11 @@ class RunToolHandler:
         self._browser_tab_owned = False
         self._refresh_thread: threading.Thread | None = None
         self._pending_screenshots: dict[str, str] = {}
+        self.supervisor = ProcessSupervisor()
+
+    def terminate_processes(self) -> int:
+        """Kill every process group this handler still has running."""
+        return self.supervisor.terminate_all()
 
     def _execute_default(
         self,
@@ -174,6 +138,7 @@ class RunToolHandler:
             kill_on_timeout=kill_on_timeout,
             stdout_limit=stdout_limit,
             env=env,
+            supervisor=self.supervisor,
         )
 
     def note_user_transcript(self, _text: str) -> None:
@@ -535,7 +500,10 @@ class RunToolHandler:
                 }:
                     self._browser_tab_owned = False
             stdout = result.stdout
-            if result.exit_code == 0 and decision.argv[:1] == ("herdr",):
+            # A truncated producer response is never parsed as a whole; it
+            # falls through to the plain bounded-text path instead.
+            parseable = result.exit_code == 0 and not result.truncated
+            if parseable and decision.argv[:1] == ("herdr",):
                 try:
                     payload = json.loads(stdout)
                     if decision.argv[1:3] == ("agent", "list"):
@@ -553,7 +521,7 @@ class RunToolHandler:
                         )[:600]
                 except (json.JSONDecodeError, TypeError):
                     stdout = stdout[:600]
-            if result.exit_code == 0 and decision.argv[:2] == ("hyprctl", "clients"):
+            if parseable and decision.argv[:2] == ("hyprctl", "clients"):
                 try:
                     stdout = "\n".join(compact_hypr_clients(json.loads(stdout)))
                 except (json.JSONDecodeError, TypeError):
@@ -618,8 +586,12 @@ def emit_event(event: Mapping[str, Any]) -> None:
 
 def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
     config = dict(DEFAULT_CONFIG)
-    if path.exists():
-        loaded = json.loads(path.read_text())
+    try:
+        raw = read_private_path(path, limit=MAX_CONFIG_BYTES, private=False)
+    except PrivateFileError as error:
+        raise ValueError(f"refusing to load {path}: {error}") from error
+    if raw is not None:
+        loaded = json.loads(raw.decode("utf-8"))
         if not isinstance(loaded, Mapping):
             raise ValueError(f"{path} must contain a JSON object")
         loaded = dict(loaded)
@@ -644,7 +616,11 @@ def load_api_key(path: Path = API_KEY_PATH) -> str:
     value = os.environ.get("ELEVENLABS_API_KEY", "").strip()
     if value:
         return value
-    return path.read_text().strip() if path.exists() else ""
+    try:
+        raw = read_private_path(path, limit=MAX_SECRET_BYTES)
+    except PrivateFileError as error:
+        raise ValueError(f"refusing to read {path}: {error}") from error
+    return raw.decode("utf-8", "replace").strip() if raw else ""
 
 
 def sweep_screenshot_cache(
@@ -669,27 +645,61 @@ def sweep_screenshot_cache(
     return removed
 
 
+HERDR_LIST_STDOUT_LIMIT = 64_000
+HERDR_MAX_AGENTS = 100
+HERDR_MAX_FIELD_CHARS = 80
+
+
 def _agent_statuses() -> dict[str, tuple[str, str]]:
-    completed = subprocess.run(
+    completed = execute_process(
         ["herdr", "agent", "list"],
-        capture_output=True,
-        text=True,
-        timeout=2,
-        check=False,
+        timeout=2.0,
+        kill_on_timeout=True,
+        stdout_limit=HERDR_LIST_STDOUT_LIMIT,
     )
-    if completed.returncode != 0:
+    if completed.timed_out:
+        raise RuntimeError("herdr agent list timed out")
+    if completed.exit_code != 0:
         raise RuntimeError(completed.stderr.strip() or "herdr agent list failed")
+    if completed.truncated:
+        raise RuntimeError("herdr agent list exceeded the inventory limit")
     payload = json.loads(completed.stdout)
-    result = payload.get("result", payload)
+    result = payload.get("result", payload) if isinstance(payload, Mapping) else None
+    if not isinstance(result, Mapping):
+        raise ValueError("herdr agent list returned no object")
+    agents = result.get("agents", [])
+    if not isinstance(agents, list):
+        raise ValueError("herdr agent list returned no agent list")
     statuses = {}
-    for agent in result.get("agents", []):
-        pane = str(agent.get("pane_id", ""))
+    for agent in agents[:HERDR_MAX_AGENTS]:
+        if not isinstance(agent, Mapping):
+            continue
+        pane = str(agent.get("pane_id", ""))[:HERDR_MAX_FIELD_CHARS]
         if pane:
+            name = str(agent.get("name") or agent.get("agent") or pane)
             statuses[pane] = (
-                str(agent.get("name") or agent.get("agent") or pane),
-                str(agent.get("agent_status", "unknown")),
+                " ".join(name.split())[:HERDR_MAX_FIELD_CHARS],
+                " ".join(str(agent.get("agent_status", "unknown")).split())[
+                    :HERDR_MAX_FIELD_CHARS
+                ],
             )
     return statuses
+
+
+CONTEXT_UPDATE_BACKLOG = 32
+
+
+def offer_update(updates: queue.Queue[str], text: str) -> None:
+    """Queue a contextual update, dropping the oldest when the session lags."""
+    while True:
+        try:
+            updates.put_nowait(text)
+            return
+        except queue.Full:
+            try:
+                updates.get_nowait()
+            except queue.Empty:
+                continue
 
 
 def watch_herdr(
@@ -737,7 +747,7 @@ def watch_herdr(
             if pane not in current:
                 changes.append(f"{name} vanished")
         if changes:
-            contextual_updates.put("Herdr: " + "; ".join(changes))
+            offer_update(contextual_updates, "Herdr: " + "; ".join(changes))
         previous = current
 
 
@@ -938,7 +948,7 @@ def run_session(config: Mapping[str, Any], api_key: str) -> int:
 
     stop_requested = threading.Event()
     session_ended = threading.Event()
-    contextual_updates: queue.Queue[str] = queue.Queue()
+    contextual_updates: queue.Queue[str] = queue.Queue(maxsize=CONTEXT_UPDATE_BACKLOG)
     levels = LevelThrottle(
         lambda in_level, out_level: emit_event(
             {"event": "level", "in": in_level, "out": out_level}
@@ -978,7 +988,7 @@ def run_session(config: Mapping[str, Any], api_key: str) -> int:
         catalog=catalog,
         dispatchers=HYPR_DISPATCHERS,
         config=config,
-        context_sink=contextual_updates.put,
+        context_sink=lambda text: offer_update(contextual_updates, text),
         event_sink=on_tool_event,
         state_provider=desktop_state,
         screenshot_sender=upload_screenshot,
@@ -1104,6 +1114,7 @@ def run_session(config: Mapping[str, Any], api_key: str) -> int:
         levels.force_zero()
         emit_state("idle")
         handler.clear_session_approvals()
+        handler.terminate_processes()
     return 0
 
 

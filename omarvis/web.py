@@ -8,7 +8,7 @@ import os
 import queue
 import secrets
 import signal
-import subprocess
+import stat as stat_module
 import sys
 import threading
 import time
@@ -24,6 +24,8 @@ from urllib.parse import parse_qs, urlsplit
 
 from .catalog import HYPR_DISPATCHERS, catalog_variables, desktop_state, load_catalog
 from .daemon import ExecutionResult, RunToolHandler, load_api_key, load_config
+from .privatefiles import MAX_SECRET_BYTES, private_dir, read_private_file, write_private_file
+from .process import execute_process
 from .screenshot import capture_and_upload_screenshot
 
 
@@ -36,6 +38,7 @@ MOUNT_PATH = "/omarvis"
 DATA_DIR = Path.home() / ".local" / "share" / "omarvis"
 SECRET_PATH = DATA_DIR / "web-secret"
 THEME_DIR = Path.home() / ".local" / "state" / "omarchy" / "current" / "theme"
+THEME_FILE_LIMIT = 256 * 1024
 WEB_ASSET = Path(__file__).resolve().parent.parent / "assets" / "web" / "index.html"
 # Downloaded and checksum-verified by omarvis-setup so the repository does not
 # carry the bundle and the phone page still never fetches third-party
@@ -58,20 +61,15 @@ def emit_json(payload: Mapping[str, Any]) -> None:
 
 
 def stable_secret(path: Path = SECRET_PATH) -> str:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        path.parent.chmod(0o700)
-    except OSError:
-        pass
-    if path.exists():
-        value = path.read_text(encoding="utf-8").strip()
-        if value:
-            path.chmod(0o600)
-            return value
-    value = secrets.token_urlsafe(32)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(value + "\n")
+    """Load or mint the bearer secret through a validated directory descriptor."""
+    with private_dir(path.parent) as dir_fd:
+        raw = read_private_file(dir_fd, path.name, limit=MAX_SECRET_BYTES)
+        if raw is not None:
+            value = raw.decode("utf-8", "replace").strip()
+            if value:
+                return value
+        value = secrets.token_urlsafe(32)
+        write_private_file(dir_fd, path.name, (value + "\n").encode("utf-8"))
     return value
 
 
@@ -91,16 +89,26 @@ class CommandResult:
     stderr: str = ""
 
 
+HELPER_TIMEOUT_SECONDS = 15.0
+HELPER_STDOUT_LIMIT = 64_000
+
+
 def run_command(argv: Sequence[str]) -> CommandResult:
+    """Run a Tailscale helper with the same capped process-group runner as tools."""
     try:
-        completed = subprocess.run(
-            list(argv), capture_output=True, text=True, check=False, timeout=15
+        result = execute_process(
+            list(argv),
+            timeout=HELPER_TIMEOUT_SECONDS,
+            kill_on_timeout=True,
+            stdout_limit=HELPER_STDOUT_LIMIT,
         )
     except FileNotFoundError as error:
         return CommandResult(127, stderr=str(error))
-    except subprocess.TimeoutExpired:
+    if result.timed_out:
         return CommandResult(124, stderr="command timed out")
-    return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+    if result.overflowed or result.truncated:
+        return CommandResult(125, stderr="command produced too much output")
+    return CommandResult(result.exit_code or 0, result.stdout, result.stderr)
 
 
 def _message(result: CommandResult) -> str:
@@ -211,13 +219,25 @@ class TailnetController:
         return remove_mount(self.runner)
 
 
+SUBSCRIBER_BACKLOG = 64
+
+
 class EventBroker:
-    def __init__(self) -> None:
+    """Fan events out to SSE subscribers with a bounded backlog per client.
+
+    A slow or stalled phone must not retain events forever, so each subscriber
+    holds at most ``SUBSCRIBER_BACKLOG`` events and the oldest is dropped when
+    a new one arrives; the newest events (including "ended") always survive.
+    """
+
+    def __init__(self, backlog: int = SUBSCRIBER_BACKLOG) -> None:
         self._lock = threading.Lock()
         self._subscribers: set[queue.Queue[dict[str, Any]]] = set()
+        self.backlog = backlog
+        self.dropped = 0
 
     def subscribe(self) -> queue.Queue[dict[str, Any]]:
-        stream: queue.Queue[dict[str, Any]] = queue.Queue()
+        stream: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=self.backlog)
         with self._lock:
             self._subscribers.add(stream)
         return stream
@@ -231,7 +251,16 @@ class EventBroker:
         with self._lock:
             subscribers = tuple(self._subscribers)
         for stream in subscribers:
-            stream.put(event)
+            while True:
+                try:
+                    stream.put_nowait(event)
+                    break
+                except queue.Full:
+                    try:
+                        stream.get_nowait()
+                        self.dropped += 1
+                    except queue.Empty:
+                        continue
 
 
 @dataclass
@@ -467,6 +496,7 @@ class RemoteApplication:
         if session is None:
             return False
         session.handler.clear_session_approvals()
+        session.handler.terminate_processes()
         self.broker.publish({"event": "ended", "reason": reason})
         self.command_sink({"event": "phone", "active": False, "reason": reason})
         return True
@@ -502,11 +532,20 @@ class ThemeAssets:
 
     @staticmethod
     def _load_toml(path: Path) -> dict[str, Any]:
+        # The theme directory is a symlink by design, so this is a bounded
+        # regular-file read rather than a no-follow one.
         try:
             with path.open("rb") as handle:
-                return tomllib.load(handle)
-        except (OSError, tomllib.TOMLDecodeError):
+                info = os.fstat(handle.fileno())
+                if not stat_module.S_ISREG(info.st_mode) or info.st_size > THEME_FILE_LIMIT:
+                    return {}
+                raw = handle.read(THEME_FILE_LIMIT + 1)
+            if len(raw) > THEME_FILE_LIMIT:
+                return {}
+            loaded = tomllib.loads(raw.decode("utf-8"))
+        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
             return {}
+        return loaded if isinstance(loaded, dict) else {}
 
     @staticmethod
     def _color(shell: Mapping[str, Any], colors: Mapping[str, Any], value: Any, fallback: str) -> str:

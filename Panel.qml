@@ -168,6 +168,7 @@ Panel {
       visible: root.setting("showLabel", false)
       anchors.verticalCenter: parent.verticalCenter
       text: root.displayState
+      textFormat: Text.PlainText
       color: root.foreground
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall
@@ -275,6 +276,7 @@ Panel {
 
               Text {
                 text: keybindingRow.modelData.label
+                textFormat: Text.PlainText
                 color: root.foreground
                 opacity: 0.6
                 font.family: root.fontFamily
@@ -288,6 +290,7 @@ Panel {
 
               Text {
                 text: keybindingRow.modelData.keys
+                textFormat: Text.PlainText
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -438,6 +441,7 @@ Panel {
             visible: root.remoteProblem !== ""
             width: parent.width
             text: root.remoteProblem
+            textFormat: Text.PlainText
             color: root.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall

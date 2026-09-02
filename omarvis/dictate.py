@@ -13,6 +13,7 @@ from typing import Any
 
 from .daemon import load_api_key, load_config
 from .levels import LevelThrottle, rms_level
+from .process import execute_process
 
 SAMPLE_RATE = 16_000
 CHANNELS = 1
@@ -43,7 +44,22 @@ TERMINAL_CLASSES = {
 }
 
 
-def active_window_is_terminal(runner: Callable[..., Any] = subprocess.run) -> bool:
+def _capped_run(argv: Sequence[str], **options: Any) -> Any:
+    """subprocess.run stand-in that streams output through the capped runner."""
+    timeout = float(options.get("timeout") or 10.0)
+    result = execute_process(
+        list(argv), timeout=timeout, kill_on_timeout=True, stdout_limit=64_000
+    )
+    if result.timed_out:
+        raise subprocess.TimeoutExpired(list(argv), timeout)
+    if options.get("check") and (result.exit_code != 0 or result.truncated):
+        raise subprocess.CalledProcessError(result.exit_code or 1, list(argv))
+    return subprocess.CompletedProcess(
+        list(argv), result.exit_code or 0, result.stdout, result.stderr
+    )
+
+
+def active_window_is_terminal(runner: Callable[..., Any] = _capped_run) -> bool:
     try:
         result = runner(
             ["hyprctl", "activewindow", "-j"],
@@ -60,7 +76,7 @@ def active_window_is_terminal(runner: Callable[..., Any] = subprocess.run) -> bo
 def inject_text(
     text: str,
     *,
-    runner: Callable[..., Any] = subprocess.run,
+    runner: Callable[..., Any] | None = None,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> None:
     """Paste the transcript in one shot instead of typing it out.
@@ -73,12 +89,14 @@ def inject_text(
         return
     # Give wl-copy a beat to take clipboard ownership before the paste lands.
     sleeper(0.1)
-    if active_window_is_terminal(runner):
+    # Only the window probe captures output; the paste and clipboard helpers
+    # write nothing back, so they keep the plain runner with /dev/null stdio.
+    if active_window_is_terminal(runner or _capped_run):
         argv = ["wtype", "-M", "ctrl", "-M", "shift", "-P", "v", "-p", "v",
                 "-m", "shift", "-m", "ctrl"]
     else:
         argv = ["wtype", "-M", "ctrl", "-P", "v", "-p", "v", "-m", "ctrl"]
-    runner(
+    (runner or subprocess.run)(
         argv,
         check=True,
         timeout=10,

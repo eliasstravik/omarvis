@@ -916,6 +916,73 @@ def test_main_starts_one_kind_of_session_with_no_mode_arguments(monkeypatch):
             daemon.main(retired)
 
 
+def test_load_config_refuses_symlinked_config(tmp_path):
+    from omarvis.daemon import load_config
+
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text('{"agent_id": "planted"}')
+    path = tmp_path / "config.json"
+    path.symlink_to(elsewhere)
+
+    with pytest.raises(ValueError, match="refusing to load"):
+        load_config(path)
+
+
+def test_load_api_key_refuses_fifo_and_tightens_mode(tmp_path, monkeypatch):
+    import os
+    import stat
+
+    from omarvis.daemon import load_api_key
+
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    fifo = tmp_path / "api_key"
+    os.mkfifo(fifo)
+    with pytest.raises(ValueError, match="refusing to read"):
+        load_api_key(fifo)
+
+    loose = tmp_path / "loose_key"
+    loose.write_text("sk-test\n")
+    loose.chmod(0o644)
+    assert load_api_key(loose) == "sk-test"
+    assert stat.S_IMODE(loose.stat().st_mode) == 0o600
+
+
+def test_agent_statuses_bounds_cardinality_and_field_length(monkeypatch):
+    from omarvis import daemon
+
+    agents = [
+        {"pane_id": f"%{index}", "name": "n" * 500, "agent_status": "s" * 500}
+        for index in range(daemon.HERDR_MAX_AGENTS + 50)
+    ]
+    agents.append("not-a-mapping")
+    payload = json.dumps({"result": {"agents": agents}})
+    captured = {}
+
+    def executor(argv, **options):
+        captured.update(options)
+        return ExecutionResult(0, payload, "")
+
+    monkeypatch.setattr(daemon, "execute_process", executor)
+    statuses = daemon._agent_statuses()
+
+    assert captured["kill_on_timeout"] is True
+    assert captured["stdout_limit"] == daemon.HERDR_LIST_STDOUT_LIMIT
+    assert len(statuses) == daemon.HERDR_MAX_AGENTS
+    name, status = statuses["%0"]
+    assert len(name) == daemon.HERDR_MAX_FIELD_CHARS
+    assert len(status) == daemon.HERDR_MAX_FIELD_CHARS
+
+
+def test_agent_statuses_rejects_non_object_inventory(monkeypatch):
+    from omarvis import daemon
+
+    monkeypatch.setattr(
+        daemon, "execute_process", lambda *_a, **_k: ExecutionResult(0, "[1, 2]", "")
+    )
+    with pytest.raises(ValueError):
+        daemon._agent_statuses()
+
+
 def test_load_config_deep_merges_dictation_defaults(tmp_path):
     from omarvis.daemon import load_config
 

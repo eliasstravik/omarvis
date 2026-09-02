@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import queue
 import re
 import stat
+import subprocess
 import threading
+import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -15,6 +19,7 @@ from omarvis.web import (
     FONT_DIR,
     FONT_FILES,
     CommandResult,
+    EventBroker,
     RemoteApplication,
     TailnetController,
     ThemeAssets,
@@ -23,8 +28,10 @@ from omarvis.web import (
     main,
     parse_tailscale_status,
     remove_mount,
+    run_command,
     stable_secret,
 )
+from omarvis.privatefiles import PrivateFileError
 
 
 def test_stable_secret_is_reused_and_private(tmp_path: Path) -> None:
@@ -36,6 +43,60 @@ def test_stable_secret_is_reused_and_private(tmp_path: Path) -> None:
     assert len(first) >= 32
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+def test_stable_secret_refuses_a_planted_symlink(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_text("not-a-secret")
+    path = tmp_path / "state" / "web-secret"
+    path.parent.mkdir()
+    path.symlink_to(elsewhere)
+
+    with pytest.raises(PrivateFileError):
+        stable_secret(path)
+
+
+def test_stable_secret_refuses_a_fifo(tmp_path: Path) -> None:
+    path = tmp_path / "state" / "web-secret"
+    path.parent.mkdir()
+    os.mkfifo(path)
+
+    with pytest.raises(PrivateFileError):
+        stable_secret(path)
+
+
+def test_event_broker_drops_oldest_events_for_slow_subscribers() -> None:
+    broker = EventBroker(backlog=3)
+    stream = broker.subscribe()
+    for index in range(5):
+        broker.publish({"event": "context", "index": index})
+
+    drained = []
+    while True:
+        try:
+            drained.append(stream.get_nowait()["index"])
+        except queue.Empty:
+            break
+    assert drained == [2, 3, 4]
+    assert broker.dropped == 2
+
+
+def test_run_command_kills_output_floods_and_reports_them() -> None:
+    result = run_command(["yes"])
+
+    assert result.returncode == 125
+    assert "too much output" in result.stderr
+
+
+def test_run_command_times_out_process_group(monkeypatch) -> None:
+    monkeypatch.setattr("omarvis.web.HELPER_TIMEOUT_SECONDS", 0.2)
+
+    result = run_command(["bash", "-c", "sleep 34.5 & sleep 34.5"])
+
+    assert result.returncode == 124
+    assert subprocess.run(
+        ["pgrep", "-f", "^sleep 34.5$"], capture_output=True, text=True, check=False
+    ).stdout == ""
 
 
 @pytest.mark.parametrize("message", ["no such mount", "handler does not exist"])
@@ -204,6 +265,36 @@ def test_token_mint_registers_fresh_bound_session_without_start_grace(monkeypatc
             {"event": "phone", "active": False, "reason": "takeover"},
             {"event": "phone", "active": True},
         ]
+    finally:
+        app.stop()
+
+
+def test_takeover_and_end_session_terminate_the_old_handlers_processes(monkeypatch) -> None:
+    from omarvis.process import execute_process
+
+    app, _events = _simulate_app(monkeypatch)
+    try:
+        app.mint_token()
+        first_handler = app.session().handler
+        launched = execute_process(
+            ["sleep", "35.5"],
+            timeout=0.05,
+            kill_on_timeout=False,
+            stdout_limit=10,
+            supervisor=first_handler.supervisor,
+        )
+        assert launched.started
+        assert len(first_handler.supervisor.live()) == 1
+
+        app.mint_token()
+
+        deadline = time.monotonic() + 5.0
+        while first_handler.supervisor.live() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert first_handler.supervisor.live() == ()
+        assert subprocess.run(
+            ["pgrep", "-f", "^sleep 35.5$"], capture_output=True, text=True, check=False
+        ).stdout == ""
     finally:
         app.stop()
 

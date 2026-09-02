@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .daemon import CONFIG_PATH, DEFAULT_CONFIG, load_api_key, load_config
+from .privatefiles import write_private_path
 
 PROMPT_PATH = Path(__file__).parent.parent / "agent" / "prompt.md"
 DYNAMIC_VARIABLES = (
@@ -94,9 +95,10 @@ def conversation_payload(
 
 
 def save_config(config: dict[str, Any], path: Path = CONFIG_PATH) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
-    path.chmod(0o600)
+    """Publish the config as a fresh 0600 file, renamed into place atomically."""
+    write_private_path(
+        path, (json.dumps(config, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    )
 
 
 def manual_steps() -> str:

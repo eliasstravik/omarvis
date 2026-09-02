@@ -251,9 +251,14 @@ print_key_instructions() {
 }
 
 store_api_key() {
+  # Write a fresh private file and rename it into place so a pre-planted
+  # symlink or FIFO at the key path can never receive the secret.
+  local tmp
   install -d -m 700 "$CONFIG_DIR"
-  install -m 600 /dev/null "$KEY_PATH"
-  printf '%s\n' "$1" >"$KEY_PATH"
+  tmp=$(umask 077 && mktemp "$CONFIG_DIR/.api_key.XXXXXXXX")
+  printf '%s\n' "$1" >"$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$KEY_PATH"
 }
 
 if [[ -s $KEY_PATH ]]; then

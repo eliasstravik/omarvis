@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
+from .process import execute_process
 
 
 def capture_screenshot(config: Mapping[str, Any]) -> Path:
@@ -14,15 +14,16 @@ def capture_screenshot(config: Mapping[str, Any]) -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["OMARCHY_SCREENSHOT_DIR"] = str(cache_dir)
-    completed = subprocess.run(
+    completed = execute_process(
         ["omarchy", "capture", "screenshot", "fullscreen", "save"],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
+        timeout=15.0,
+        kill_on_timeout=True,
+        stdout_limit=4000,
         env=env,
     )
-    if completed.returncode != 0:
+    if completed.timed_out:
+        raise RuntimeError("Screenshot capture timed out")
+    if completed.exit_code != 0:
         raise RuntimeError(completed.stderr.strip() or "Screenshot capture failed")
     output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
     if not output_lines:
