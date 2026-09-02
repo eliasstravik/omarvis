@@ -49,11 +49,17 @@ hl.define_submap("omarvis-dictate", function()
   o.bind("ESCAPE", "Omarvis Cancel", "omarchy-shell omarvis dictate cancel")
   hl.bind("ESCAPE", hl.dsp.submap("reset"))
 end)
+hl.define_submap("omarvis-handsfree", function()
+  o.bind("SUPER + J", "Omarvis Hands-free Send", "omarchy-shell omarvis dictate start")
+  hl.bind("SUPER + J", hl.dsp.submap("reset"))
+  o.bind("ESCAPE", "Omarvis Hands-free Cancel", "omarchy-shell omarvis dictate cancel")
+  hl.bind("ESCAPE", hl.dsp.submap("reset"))
+end)
 o.bind("SUPER + ALT + J", "Omarvis Panel", "omarchy-shell omarvis panel")
 o.bind("SUPER + SHIFT + J", "Omarvis Remote", "omarchy-shell omarvis toggleRemote")
 ```
 
-`SUPER + CTRL + J` starts or ends the two-way voice call — the only kind of session Omarvis has. Hold `SUPER + J` to dictate your own words into the focused window; release to type them. While holding, press `SPACE` to go hands-free: the recording stays open after you let go, a fresh `SUPER + J` tap types it, and `ESCAPE` discards it. Holding `SUPER + J` puts Hyprland into a small submap, so the chord never reaches the global `SUPER + SPACE` menu binding, and the submap ends with the release. Left-click the bar microphone, or press `SUPER + ALT + J`, to open the Omarvis panel. Right-click is intentionally inert. Setup deletes any `SUPER + SHIFT + J` Ask binding or `SUPER + ALT + J` text binding an older install left behind, and rewrites a pre-submap dictation pair.
+`SUPER + CTRL + J` starts or ends the two-way voice call — the only kind of session Omarvis has. Hold `SUPER + J` to dictate your own words into the focused window; release to type them. While holding, press `SPACE` to go hands-free: the recording stays open after you let go, a fresh `SUPER + J` tap types it, and `ESCAPE` discards it. Holding `SUPER + J` puts Hyprland into a small submap, so the chord never reaches the global `SUPER + SPACE` menu binding, and the submap ends with the release. Once you let go after the chord, the shell moves Hyprland into a second submap for as long as the recording stays open, where `SUPER + J` and `ESCAPE` are the only bindings; it ends the moment the recording does, or at shell startup. Left-click the bar microphone, or press `SUPER + ALT + J`, to open the Omarvis panel. Right-click is intentionally inert. Setup deletes any `SUPER + SHIFT + J` Ask binding or `SUPER + ALT + J` text binding an older install left behind, and rewrites a pre-submap dictation pair.
 
 ## Panel
 

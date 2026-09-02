@@ -317,8 +317,11 @@ class DictationService:
                 return "not-recording"
             if self.locked and self._release_pending:
                 # The key release that follows the Space chord must not end
-                # a recording the user just asked to keep open.
+                # a recording the user just asked to keep open. Announce it so
+                # the shell can move Hyprland into the hands-free submap now
+                # that the keys are up.
                 self._release_pending = False
+                self._emit("recording", locked=True, released=True)
                 return "locked"
             if (
                 not self.locked
@@ -386,6 +389,7 @@ class DictationService:
         return "canceled"
 
     def _finish(self, audio: bytes) -> None:
+        started = time.monotonic()
         try:
             if not audio:
                 raise RuntimeError("No audio was captured")
@@ -394,10 +398,22 @@ class DictationService:
             )
             if not transcript:
                 raise RuntimeError("No speech was detected")
+            print(
+                f"transcribed {len(transcript)} chars from {len(audio)} bytes "
+                f"in {time.monotonic() - started:.1f}s",
+                file=sys.stderr,
+                flush=True,
+            )
             copy_to_clipboard(transcript)
             try:
                 self.injector(transcript)
+                print(
+                    f"pasted after {time.monotonic() - started:.1f}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
             except Exception as error:
+                print(f"inject failed: {error}", file=sys.stderr, flush=True)
                 with self._lock:
                     self._emit("error", message=str(error), text=transcript)
                     self._emit("idle")
@@ -405,6 +421,12 @@ class DictationService:
             with self._lock:
                 self._emit("idle", text=transcript)
         except Exception as error:
+            print(
+                f"finish failed after {time.monotonic() - started:.1f}s "
+                f"({len(audio)} bytes): {type(error).__name__}: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
             with self._lock:
                 self._emit("error", message=str(error))
                 self._emit("idle")
@@ -461,15 +483,22 @@ def main(_argv: Sequence[str] | None = None) -> int:
     emit_event({"event": "dictation", "state": "idle", "ready": True})
     for raw_command in sys.stdin:
         command = raw_command.strip().lower()
+        reply = ""
         if command == "start":
-            service.start()
+            reply = service.start()
         elif command == "stop":
-            service.stop()
+            reply = service.stop()
         elif command == "handsfree":
-            service.handsfree()
+            reply = service.handsfree()
         elif command == "cancel":
-            service.cancel()
-        elif command in {"quit", "exit"}:
+            reply = service.cancel()
+        if reply:
+            # One line per key event on stderr (the shell journal), so a
+            # binding that never arrives or arrives out of order is visible.
+            print(f"command {command} -> {reply}", file=sys.stderr, flush=True)
+        if reply:
+            continue
+        if command in {"quit", "exit"}:
             service.close()
             break
         elif command:

@@ -447,6 +447,7 @@ def test_release_after_handsfree_chord_does_not_stop_recording():
     assert service.stop() == "locked"
     assert service.state == "recording"
     assert service.locked is True
+    assert {"event": "dictation", "state": "recording", "locked": True, "released": True} in events
 
     clock.now = 20.0
     assert service.start() == "transcribing"

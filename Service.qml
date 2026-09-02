@@ -94,12 +94,28 @@ Item {
     root.applyDictationEvent(event)
   }
 
+  // Hands-free keeps Hyprland in the "omarvis-handsfree" submap from
+  // bindings.lua for as long as the recording is locked open: there, ESCAPE
+  // cancels and SUPER+J sends, as static binds that need no runtime
+  // rebinding. The daemon reports the swallowed key release, which is the
+  // moment the hold submap has already been left, so entering here never
+  // races the release binds; leaving any recording state ends it.
+  property bool handsfreeSubmap: false
+
+  function setHandsfreeSubmap(active) {
+    if (active === root.handsfreeSubmap) return
+    root.handsfreeSubmap = active
+    Quickshell.execDetached(["hyprctl", "dispatch", "submap", active ? "omarvis-handsfree" : "reset"])
+  }
+
   function applyDictationEvent(event) {
     var nextState = String(event.state || "idle")
     if (nextState !== root.dictationState && nextState !== "error") root.lastError = ""
     root.dictationState = nextState
     if (event.locked !== undefined) root.dictationLocked = !!event.locked
     if (nextState !== "recording") root.dictationLocked = false
+    if (nextState === "recording" && event.released === true) setHandsfreeSubmap(true)
+    if (nextState !== "recording") setHandsfreeSubmap(false)
     if (event.level !== undefined) root.dictationLevel = Math.max(0, Math.min(1, Number(event.level || 0)))
     else if (nextState !== "recording") root.dictationLevel = 0.0
     if (event.message) {
@@ -163,8 +179,10 @@ Item {
   // dismisses an error — and is reset on startup in case a crash left it.
   // Error state shows no HUD (the error went to a notification), so Escape
   // must not be silently intercepted there.
-  readonly property bool escapeLive: dictationState === "recording"
-    || (sessionState !== "idle" && sessionState !== "error")
+  // Dictation is not listed here: while the keys are held, ESCAPE lives in
+  // the "omarvis-dictate" submap, and in hands-free it lives in the
+  // "omarvis-handsfree" submap, both static in bindings.lua.
+  readonly property bool escapeLive: sessionState !== "idle" && sessionState !== "error"
   // A phone call is intentionally excluded: Escape at the desk must not end
   // a call happening in another room. While the native panel is open, its
   // key catcher owns Escape and closes the panel before the next press may
@@ -215,17 +233,25 @@ Item {
 
   Component.onCompleted: {
     updateEscapeBind()
+    // A crash or reload mid-dictation must never leave Hyprland in one of
+    // the dictation submaps.
+    Quickshell.execDetached(["hyprctl", "dispatch", "submap", "reset"])
   }
 
   // Omarchy's Lua config parser rejects `hyprctl keyword bind`, so the
   // dynamic bind goes through the same `o.bind`/`hl.unbind` Lua API the
   // static config uses, via `hyprctl eval`.
+  // The bind handle is kept in the compositor's Lua state so teardown
+  // removes exactly this bind: hl.unbind("ESCAPE") would also strip the
+  // ESCAPE binds inside the dictation submaps.
   function updateEscapeBind() {
     if (root.escapeBindWanted)
       Quickshell.execDetached(["hyprctl", "eval",
-        "o.bind(\"ESCAPE\", \"Omarvis escape\", \"omarchy-shell omarvis esc\")"])
+        "if _G.omarvis_escape then _G.omarvis_escape:unbind() end "
+        + "_G.omarvis_escape = hl.bind(\"ESCAPE\", hl.dsp.exec_cmd(\"omarchy-shell omarvis esc\"), { description = \"Omarvis escape\" })"])
     else
-      Quickshell.execDetached(["hyprctl", "eval", "hl.unbind(\"ESCAPE\")"])
+      Quickshell.execDetached(["hyprctl", "eval",
+        "if _G.omarvis_escape then _G.omarvis_escape:unbind() _G.omarvis_escape = nil end"])
   }
 
   // Escape ends the most immediate live thing: dictation recording first,

@@ -55,9 +55,13 @@ def test_service_routes_handsfree_and_cancel_and_manages_escape_bind():
     assert "omarvis-dictate" in service  # the Hyprland submap from bindings.lua
     # Omarchy's lua parser rejects keyword-style binds; must go via eval.
     assert "hyprctl eval" in service
-    assert 'o.bind(\\"ESCAPE\\"' in service
+    assert '_G.omarvis_escape = hl.bind(\\"ESCAPE\\"' in service
     assert "omarchy-shell omarvis esc" in service
-    assert 'hl.unbind(\\"ESCAPE\\")' in service
+    # Teardown removes only this handle; a global hl.unbind("ESCAPE") would
+    # also strip the ESCAPE binds inside the dictation submaps.
+    assert "_G.omarvis_escape:unbind()" in service
+    assert 'hl.unbind(\\"ESCAPE\\")' not in service
+    assert "omarvis-handsfree" in service
     assert "onEscapeBindWantedChanged: updateEscapeBind()" in service
 
 
@@ -67,8 +71,7 @@ def test_escape_ends_whatever_is_live_with_dictation_first():
     # Escape is live for a dictation recording OR any non-idle session, and
     # the hands-free chord lives in the dictation submap, so the menu
     # keeps working during voice sessions.
-    assert 'escapeLive: dictationState === "recording"' in service
-    assert '(sessionState !== "idle" && sessionState !== "error")' in service
+    assert 'escapeLive: sessionState !== "idle" && sessionState !== "error"' in service
     assert "function esc(): string { return root.escapeAction() }" in service
     body = service.split("function escapeAction")[1]
     assert body.index('root.dictate("cancel")') < body.index("root.stop()")
@@ -117,7 +120,7 @@ def test_phone_state_is_separate_from_local_hud_state():
         'property string phoneRunningCommand: ""',
     ):
         assert declaration in service
-    assert 'escapeLive: dictationState === "recording"' in service
+    assert 'escapeLive: sessionState !== "idle" && sessionState !== "error"' in service
     escape_live = service.split("readonly property bool escapeLive", 1)[1].split("readonly property bool escapeBindWanted", 1)[0]
     assert "phoneSessionActive" not in escape_live
 
