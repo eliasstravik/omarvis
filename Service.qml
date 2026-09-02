@@ -154,16 +154,13 @@ Item {
     return replies[command]
   }
 
-  // While Omarvis is live, expose that to keybindings. Two separate
-  // lifetimes: the marker file bin/omarvis-space tests (SUPER+SPACE →
-  // hands-free instead of the menu) exists only during a dictation
-  // recording, so the menu keeps working during voice sessions; the dynamic
-  // plain-Escape bind exists whenever ANYTHING is live and ends it —
-  // cancels a dictation recording, hangs up a voice session, dismisses an
-  // error. Both are absent when idle, so Escape and SUPER+SPACE behave
-  // normally the rest of the time, and both are reset on startup in case a
-  // crash left them behind.
-  readonly property string dictatingMarker: Quickshell.env("XDG_RUNTIME_DIR") + "/omarvis-dictating"
+  // While Omarvis is live, expose that to keybindings. Holding SUPER+J
+  // enters the "omarvis-dictate" Hyprland submap from bindings.lua, where
+  // SPACE chords into hands-free and ESCAPE cancels without the global
+  // SUPER+SPACE menu ever seeing the chord; the submap ends on release. The
+  // dynamic plain-Escape bind below exists whenever ANYTHING is live and
+  // ends it — cancels a hands-free recording, hangs up a voice session,
+  // dismisses an error — and is reset on startup in case a crash left it.
   // Error state shows no HUD (the error went to a notification), so Escape
   // must not be silently intercepted there.
   readonly property bool escapeLive: dictationState === "recording"
@@ -174,7 +171,6 @@ Item {
   // hang up a local session.
   readonly property bool escapeBindWanted: escapeLive && !panelOpen
 
-  onDictationStateChanged: updateDictationMarker()
   onEscapeBindWantedChanged: updateEscapeBind()
 
   // The HUD is deliberately text-free, so errors — the one kind of text that
@@ -218,15 +214,7 @@ Item {
   }
 
   Component.onCompleted: {
-    updateDictationMarker()
     updateEscapeBind()
-  }
-
-  function updateDictationMarker() {
-    if (root.dictationState === "recording")
-      Quickshell.execDetached(["touch", root.dictatingMarker])
-    else
-      Quickshell.execDetached(["rm", "-f", root.dictatingMarker])
   }
 
   // Omarchy's Lua config parser rejects `hyprctl keyword bind`, so the
@@ -469,7 +457,7 @@ Item {
   function parseKeybindings(content) {
     var actions = [
       { match: 'omarchy-shell omarvis dictate start"', label: "Dictation (hold)" },
-      { match: 'bin/omarvis-space"', label: "Hands-free dictation" },
+      { match: 'omarchy-shell omarvis dictate handsfree"', label: "Hands-free dictation" },
       { match: 'omarchy-shell omarvis toggle"', label: "Talk" },
       { match: 'omarchy-shell omarvis toggleRemote"', label: "Remote access" },
       { match: 'omarchy-shell omarvis panel"', label: "Panel" },

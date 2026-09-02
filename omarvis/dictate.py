@@ -262,6 +262,7 @@ class DictationService:
         self.clock = clock
         self.state = "idle"
         self.locked = False
+        self._release_pending = False
         self._recording_started_at: float | None = None
         self._cap_timer: threading.Timer | None = None
         self._lock = threading.Lock()
@@ -274,6 +275,9 @@ class DictationService:
 
     def start(self) -> str:
         with self._lock:
+            if self.state == "recording" and self.locked:
+                # Hands-free: a fresh SUPER+J press is the "send" gesture.
+                return self._stop_locked()
             if self.state != "idle":
                 return f"already-{self.state}"
             try:
@@ -285,6 +289,7 @@ class DictationService:
                 self._emit("idle")
                 return "error"
             self.locked = False
+            self._release_pending = False
             self._recording_started_at = self.clock()
             self._start_cap_timer()
             self._emit("recording")
@@ -293,7 +298,7 @@ class DictationService:
     def _start_cap_timer(self) -> None:
         if self.max_recording_seconds <= 0:
             return
-        self._cap_timer = threading.Timer(self.max_recording_seconds, self.stop)
+        self._cap_timer = threading.Timer(self.max_recording_seconds, self._cap_reached)
         self._cap_timer.daemon = True
         self._cap_timer.start()
 
@@ -310,26 +315,43 @@ class DictationService:
         with self._lock:
             if self.state != "recording":
                 return "not-recording"
+            if self.locked and self._release_pending:
+                # The key release that follows the Space chord must not end
+                # a recording the user just asked to keep open.
+                self._release_pending = False
+                return "locked"
             if (
                 not self.locked
                 and self._recording_started_at is not None
                 and self.clock() - self._recording_started_at < self.tap_discard_seconds
             ):
                 return self._discard_locked()
-            self._cancel_cap_timer()
-            self.locked = False
-            try:
-                audio = self.recorder.stop()
-            except Exception as error:
-                self._emit("error", message=str(error))
-                self._emit("idle")
-                return "error"
-            self._emit("transcribing")
-            self._worker = threading.Thread(
-                target=self._finish, args=(audio,), daemon=True
-            )
-            self._worker.start()
-            return "transcribing"
+            return self._stop_locked()
+
+    def _cap_reached(self) -> None:
+        """Safety cap: end the recording regardless of hands-free state."""
+        with self._lock:
+            if self.state != "recording":
+                return
+            self._stop_locked()
+
+    def _stop_locked(self) -> str:
+        """Close the mic and transcribe. Caller must hold self._lock."""
+        self._cancel_cap_timer()
+        self.locked = False
+        self._release_pending = False
+        try:
+            audio = self.recorder.stop()
+        except Exception as error:
+            self._emit("error", message=str(error))
+            self._emit("idle")
+            return "error"
+        self._emit("transcribing")
+        self._worker = threading.Thread(
+            target=self._finish, args=(audio,), daemon=True
+        )
+        self._worker.start()
+        return "transcribing"
 
     def handsfree(self) -> str:
         """Lock the current recording open (Wispr-style Super+J+Space chord)."""
@@ -338,6 +360,7 @@ class DictationService:
                 return "not-recording"
             if not self.locked:
                 self.locked = True
+                self._release_pending = True
                 self._emit("recording", locked=True)
             return "locked"
 
@@ -352,6 +375,7 @@ class DictationService:
         """Close the mic and drop the audio. Caller must hold self._lock."""
         self._cancel_cap_timer()
         self.locked = False
+        self._release_pending = False
         try:
             self.recorder.stop()
         except Exception as error:

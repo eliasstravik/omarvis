@@ -44,7 +44,7 @@ Switch workspaces, launch apps, change themes, set volume and brightness, take s
 
 ### 💬 Hold a key and your words are typed for you
 
-Hold Super+J, speak, release. The transcript is typed into the focused window. Dictation is the only way Omarvis types into your apps, and it types only what you actually said.
+Hold Super+J, speak, release. The transcript is typed into the focused window. Press Space while holding to keep the mic open hands-free, then tap Super+J to type it. Dictation is the only way Omarvis types into your apps, and it types only what you actually said.
 
 ## Talk to your desktop in three steps
 

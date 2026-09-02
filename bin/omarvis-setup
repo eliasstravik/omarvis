@@ -28,7 +28,13 @@ BINDINGS_PATH="$HOME/.config/hypr/bindings.lua"
 AGENT_BINDING='o.bind("SUPER + CTRL + J", "Omarvis", "omarchy-shell omarvis toggle")'
 DICTATE_UNBIND='hl.unbind("SUPER + J")'
 DICTATE_START_BINDING='o.bind("SUPER + J", "Omarvis Dictate", "omarchy-shell omarvis dictate start")'
-DICTATE_STOP_BINDING='o.bind("SUPER + J", "Omarvis Dictate Stop", "omarchy-shell omarvis dictate stop", { release = true })'
+# Holding SUPER+J enters a Hyprland submap so SPACE can chord into hands-free
+# without the global SUPER+SPACE menu binding firing; the universal release
+# binds stop the recording and leave the submap whichever map is active.
+DICTATE_SUBMAP_ENTER='hl.bind("SUPER + J", hl.dsp.submap("omarvis-dictate"))'
+DICTATE_STOP_BINDING='o.bind("SUPER + J", "Omarvis Dictate Stop", "omarchy-shell omarvis dictate stop", { release = true, submap_universal = true })'
+DICTATE_SUBMAP_LEAVE='hl.bind("SUPER + J", hl.dsp.submap("reset"), { release = true, submap_universal = true })'
+DICTATE_SUBMAP=$'hl.define_submap("omarvis-dictate", function()\n  o.bind("SUPER + SPACE", "Omarvis Hands-free", "omarchy-shell omarvis dictate handsfree")\n  o.bind("ESCAPE", "Omarvis Cancel", "omarchy-shell omarvis dictate cancel")\n  hl.bind("ESCAPE", hl.dsp.submap("reset"))\nend)'
 PANEL_BINDING='o.bind("SUPER + ALT + J", "Omarvis Panel", "omarchy-shell omarvis panel")'
 REMOTE_BINDING='o.bind("SUPER + SHIFT + J", "Omarvis Remote", "omarchy-shell omarvis toggleRemote")'
 
@@ -311,12 +317,17 @@ if [[ -f $BINDINGS_PATH ]]; then
   if grep -Eq 'omarvis (toggle|toggleMode) ask"|/bin/omarvis-text"' "$BINDINGS_PATH"; then
     has_retired_bindings=true
   fi
-  if ! grep -Fq "$DICTATE_UNBIND" "$BINDINGS_PATH"; then
+  # The dictation keys are one unit: the press/release pair plus the submap
+  # that makes the Space chord possible. Any install without the submap (or
+  # with the pre-submap pair) gets the whole unit rewritten.
+  if ! grep -Fq 'hl.dsp.submap("omarvis-dictate")' "$BINDINGS_PATH"; then
     needs_dictation_rebind=true
-    missing_bindings+=("$DICTATE_UNBIND" "$DICTATE_START_BINDING" "$DICTATE_STOP_BINDING")
+    missing_bindings+=("$DICTATE_UNBIND" "$DICTATE_START_BINDING" "$DICTATE_SUBMAP_ENTER" "$DICTATE_STOP_BINDING" "$DICTATE_SUBMAP_LEAVE" "$DICTATE_SUBMAP")
   else
     grep -Fq 'omarchy-shell omarvis dictate start")' "$BINDINGS_PATH" || missing_bindings+=("$DICTATE_START_BINDING")
-    grep -Fq 'omarchy-shell omarvis dictate stop", { release = true })' "$BINDINGS_PATH" || missing_bindings+=("$DICTATE_STOP_BINDING")
+    grep -Fq 'omarchy-shell omarvis dictate stop", { release = true, submap_universal = true })' "$BINDINGS_PATH" || missing_bindings+=("$DICTATE_STOP_BINDING")
+    grep -Fq 'hl.dsp.submap("reset"), { release = true, submap_universal = true })' "$BINDINGS_PATH" || missing_bindings+=("$DICTATE_SUBMAP_LEAVE")
+    grep -Fq 'hl.define_submap("omarvis-dictate"' "$BINDINGS_PATH" || missing_bindings+=("$DICTATE_SUBMAP")
   fi
   grep -Fq 'omarchy-shell omarvis panel")' "$BINDINGS_PATH" || missing_bindings+=("$PANEL_BINDING")
   grep -Fq 'omarchy-shell omarvis toggleRemote")' "$BINDINGS_PATH" || missing_bindings+=("$REMOTE_BINDING")
@@ -328,7 +339,10 @@ if (( ${#missing_bindings[@]} > 0 )) || [[ $has_retired_bindings == true ]]; the
   echo "$AGENT_BINDING"
   echo "$DICTATE_UNBIND  -- replaces Omarchy's Toggle window split binding"
   echo "$DICTATE_START_BINDING"
+  echo "$DICTATE_SUBMAP_ENTER"
   echo "$DICTATE_STOP_BINDING"
+  echo "$DICTATE_SUBMAP_LEAVE"
+  echo "$DICTATE_SUBMAP"
   echo "$PANEL_BINDING"
   echo "$REMOTE_BINDING"
   if confirm "Update the missing or outdated bindings in $BINDINGS_PATH? (timestamped backup first)" n; then
@@ -435,6 +449,7 @@ if [[ $APPLY_BINDINGS == true ]]; then
   cp "$BINDINGS_PATH" "$backup"
   if [[ $needs_dictation_rebind == true ]]; then
     sed -i \
+      -e '\|^hl.unbind("SUPER + J")|d' \
       -e '\|omarchy-shell omarvis dictate start")|d' \
       -e '\|omarchy-shell omarvis dictate stop", { release = true })|d' \
       "$BINDINGS_PATH"

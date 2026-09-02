@@ -395,7 +395,8 @@ def test_next_recording_after_hands_free_session_starts_unlocked():
     service.start()
     assert service.handsfree() == "locked"
     clock.now = 5.0
-    service.stop()
+    assert service.stop() == "locked"  # the chord's own key release
+    assert service.stop() == "transcribing"
     service.wait()
 
     clock.now = 10.0
@@ -425,17 +426,36 @@ def test_handsfree_command_locks_current_recording_and_is_idempotent():
     )  # idempotent: no duplicate locked emissions
 
     clock.now = 20.0
+    assert service.stop() == "locked"  # the chord's own key release
     assert service.stop() == "transcribing"
     service.wait()
 
 
 def test_release_after_handsfree_chord_does_not_stop_recording():
-    # Wispr flow: hold Super+J, press Space (→ handsfree), then release the
-    # keys. The release still sends a stop; locked mode must survive only if
-    # the release lands inside the tap window... it doesn't — locked mode
-    # ignores the tap window entirely, so the release must be swallowed by
-    # neither: locked recordings stop on the NEXT stop. Guard the actual
-    # contract: after handsfree, the very next stop finishes the recording.
+    # Wispr flow: hold Super+J, press Space (-> handsfree), release the keys.
+    # The release still sends one stop; it must be swallowed so the recording
+    # stays open. The next Super+J press is the "send" gesture, and its own
+    # release then finds nothing to stop.
+    events = []
+    clock = SimpleNamespace(now=0.0)
+    service = _tap_service(events, clock)
+
+    service.start()
+    clock.now = 5.0
+    assert service.handsfree() == "locked"
+    clock.now = 5.2
+    assert service.stop() == "locked"
+    assert service.state == "recording"
+    assert service.locked is True
+
+    clock.now = 20.0
+    assert service.start() == "transcribing"
+    assert service.stop() == "not-recording"
+    service.wait()
+    assert service.state == "idle"
+
+
+def test_only_one_release_is_swallowed_after_hands_free():
     events = []
     clock = SimpleNamespace(now=0.0)
     service = _tap_service(events, clock)
@@ -443,10 +463,25 @@ def test_release_after_handsfree_chord_does_not_stop_recording():
     service.start()
     clock.now = 5.0
     service.handsfree()
-    clock.now = 5.2
+    assert service.stop() == "locked"
+    clock.now = 9.0
     assert service.stop() == "transcribing"
     service.wait()
     assert service.state == "idle"
+
+
+def test_safety_cap_ends_a_hands_free_recording_even_before_the_release():
+    events = []
+    clock = SimpleNamespace(now=0.0)
+    service = _tap_service(events, clock)
+
+    service.start()
+    clock.now = 5.0
+    service.handsfree()
+    service._cap_reached()
+    service.wait()
+    assert service.state == "idle"
+    assert service.locked is False
 
 
 def test_cancel_discards_recording_without_transcribing_or_typing():
@@ -495,6 +530,7 @@ def test_handsfree_command_locks_current_recording_via_space_chord():
     )
 
     clock.now = 20.0
+    assert service.stop() == "locked"  # the chord's own key release
     assert service.stop() == "transcribing"
     service.wait()
     assert service.state == "idle"

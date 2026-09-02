@@ -47,18 +47,17 @@ def test_service_wires_hud_event_protocol_and_clears_stale_state():
     assert "HudWindow" in service
 
 
-def test_service_routes_handsfree_and_cancel_and_manages_keybind_marker():
+def test_service_routes_handsfree_and_cancel_and_manages_escape_bind():
     service = (Path(__file__).parent.parent / "Service.qml").read_text()
 
     assert "handsfree: \"locked\"" in service
     assert "cancel: \"canceled\"" in service
-    assert "omarvis-dictating" in service
+    assert "omarvis-dictate" in service  # the Hyprland submap from bindings.lua
     # Omarchy's lua parser rejects keyword-style binds; must go via eval.
     assert "hyprctl eval" in service
     assert 'o.bind(\\"ESCAPE\\"' in service
     assert "omarchy-shell omarvis esc" in service
     assert 'hl.unbind(\\"ESCAPE\\")' in service
-    assert "onDictationStateChanged: updateDictationMarker()" in service
     assert "onEscapeBindWantedChanged: updateEscapeBind()" in service
 
 
@@ -66,7 +65,7 @@ def test_escape_ends_whatever_is_live_with_dictation_first():
     service = (Path(__file__).parent.parent / "Service.qml").read_text()
 
     # Escape is live for a dictation recording OR any non-idle session, and
-    # the marker (SUPER+SPACE hands-free) stays dictation-only so the menu
+    # the hands-free chord lives in the dictation submap, so the menu
     # keeps working during voice sessions.
     assert 'escapeLive: dictationState === "recording"' in service
     assert '(sessionState !== "idle" && sessionState !== "error")' in service
@@ -153,7 +152,7 @@ def test_keybindings_are_parsed_live_from_the_hyprland_bindings_file():
     assert 'indexOf("--") === 0' in service
     for match in (
         'omarchy-shell omarvis dictate start"',
-        'bin/omarvis-space"',
+        'omarchy-shell omarvis dictate handsfree"',
         'omarchy-shell omarvis toggle"',
         'omarchy-shell omarvis toggleRemote"',
         'omarchy-shell omarvis panel"',

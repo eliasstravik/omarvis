@@ -36,7 +36,7 @@ Setup validates the key against the ElevenLabs API at the prompt — a mistyped 
 Setup then offers the J-key bindings and appends any missing ones after making a timestamped backup:
 
 - `Super+Ctrl+J` starts or ends the voice call
-- Hold `Super+J` to dictate into the focused window
+- Hold `Super+J` to dictate into the focused window; press `Space` while holding to go hands-free, then tap `Super+J` to type it or `Escape` to discard
 - `Super+Ctrl+Alt+J` (or a left click on the bar microphone) opens the panel
 
 ## 3. Have your first conversation
