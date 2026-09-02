@@ -105,7 +105,10 @@ Item {
   function setHandsfreeSubmap(active) {
     if (active === root.handsfreeSubmap) return
     root.handsfreeSubmap = active
-    Quickshell.execDetached(["hyprctl", "dispatch", "submap", active ? "omarvis-handsfree" : "reset"])
+    // `hyprctl dispatch submap` is rejected by Hyprland's Lua config layer;
+    // the dispatcher has to be invoked through the Lua API.
+    Quickshell.execDetached(["hyprctl", "eval",
+      "hl.dispatch(hl.dsp.submap(\"" + (active ? "omarvis-handsfree" : "reset") + "\"))"])
   }
 
   function applyDictationEvent(event) {
@@ -235,7 +238,7 @@ Item {
     updateEscapeBind()
     // A crash or reload mid-dictation must never leave Hyprland in one of
     // the dictation submaps.
-    Quickshell.execDetached(["hyprctl", "dispatch", "submap", "reset"])
+    Quickshell.execDetached(["hyprctl", "eval", "hl.dispatch(hl.dsp.submap(\"reset\"))"])
   }
 
   // Omarchy's Lua config parser rejects `hyprctl keyword bind`, so the

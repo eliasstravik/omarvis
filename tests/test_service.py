@@ -62,6 +62,10 @@ def test_service_routes_handsfree_and_cancel_and_manages_escape_bind():
     assert "_G.omarvis_escape:unbind()" in service
     assert 'hl.unbind(\\"ESCAPE\\")' not in service
     assert "omarvis-handsfree" in service
+    # Hyprland's Lua config layer rejects `hyprctl dispatch submap NAME`; the
+    # switch has to go through the Lua dispatcher API.
+    assert 'hl.dispatch(hl.dsp.submap(' in service
+    assert '"dispatch", "submap"' not in service
     assert "onEscapeBindWantedChanged: updateEscapeBind()" in service
 
 
