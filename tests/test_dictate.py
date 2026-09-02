@@ -395,6 +395,7 @@ def test_next_recording_after_hands_free_session_starts_unlocked():
     service.start()
     assert service.handsfree() == "locked"
     clock.now = 5.0
+    clock.now = service._handsfree_at + 0.5  # let go right after the chord
     assert service.stop() == "locked"  # the chord's own key release
     assert service.stop() == "transcribing"
     service.wait()
@@ -426,6 +427,7 @@ def test_handsfree_command_locks_current_recording_and_is_idempotent():
     )  # idempotent: no duplicate locked emissions
 
     clock.now = 20.0
+    clock.now = service._handsfree_at + 0.5  # let go right after the chord
     assert service.stop() == "locked"  # the chord's own key release
     assert service.stop() == "transcribing"
     service.wait()
@@ -454,6 +456,39 @@ def test_release_after_handsfree_chord_does_not_stop_recording():
     assert service.stop() == "not-recording"
     service.wait()
     assert service.state == "idle"
+
+
+def test_letting_go_long_after_the_chord_sends_instead_of_going_hands_free():
+    # Hold Super+J, press Space, keep holding while speaking, let go much
+    # later: that release means "done" and must send on its own.
+    events = []
+    clock = SimpleNamespace(now=0.0)
+    service = _tap_service(events, clock)
+
+    service.start()
+    clock.now = 5.0
+    assert service.handsfree() == "locked"
+    clock.now = 9.0
+    assert service.stop() == "transcribing"
+    assert not any(event.get("released") for event in events)
+    service.wait()
+    assert service.state == "idle"
+
+
+def test_letting_go_within_the_grace_window_keeps_hands_free():
+    events = []
+    clock = SimpleNamespace(now=0.0)
+    service = _tap_service(events, clock)
+
+    service.start()
+    clock.now = 5.0
+    service.handsfree()
+    clock.now = 5.9
+    assert service.stop() == "locked"
+    assert service.state == "recording"
+    clock.now = 30.0
+    assert service.start() == "transcribing"
+    service.wait()
 
 
 def test_only_one_release_is_swallowed_after_hands_free():
@@ -531,6 +566,7 @@ def test_handsfree_command_locks_current_recording_via_space_chord():
     )
 
     clock.now = 20.0
+    clock.now = service._handsfree_at + 0.5  # let go right after the chord
     assert service.stop() == "locked"  # the chord's own key release
     assert service.stop() == "transcribing"
     service.wait()

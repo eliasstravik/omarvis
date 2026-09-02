@@ -238,6 +238,7 @@ class DictationService:
         event_sink: Callable[[Mapping[str, Any]], None] | None = None,
         tap_discard_seconds: float = 1.0,
         max_recording_seconds: float = 90.0,
+        handsfree_release_grace_seconds: float = 1.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.recorder = recorder
@@ -259,6 +260,10 @@ class DictationService:
         # lock can't leave the microphone open indefinitely.
         self.tap_discard_seconds = tap_discard_seconds
         self.max_recording_seconds = max_recording_seconds
+        # After the Space chord, letting go within this window keeps the mic
+        # open hands-free; letting go later means "done", and sends.
+        self.handsfree_release_grace_seconds = handsfree_release_grace_seconds
+        self._handsfree_at: float | None = None
         self.clock = clock
         self.state = "idle"
         self.locked = False
@@ -316,13 +321,20 @@ class DictationService:
             if self.state != "recording":
                 return "not-recording"
             if self.locked and self._release_pending:
-                # The key release that follows the Space chord must not end
-                # a recording the user just asked to keep open. Announce it so
-                # the shell can move Hyprland into the hands-free submap now
-                # that the keys are up.
                 self._release_pending = False
-                self._emit("recording", locked=True, released=True)
-                return "locked"
+                held_since_chord = (
+                    self.clock() - self._handsfree_at
+                    if self._handsfree_at is not None
+                    else 0.0
+                )
+                if held_since_chord <= self.handsfree_release_grace_seconds:
+                    # Letting go right after the Space chord is the hands-free
+                    # gesture: keep the mic open and tell the shell so it can
+                    # park Hyprland in the hands-free submap now the keys are up.
+                    self._emit("recording", locked=True, released=True)
+                    return "locked"
+                # Held on through the chord and let go later: that release is
+                # "done", so fall through and send.
             if (
                 not self.locked
                 and self._recording_started_at is not None
@@ -364,6 +376,7 @@ class DictationService:
             if not self.locked:
                 self.locked = True
                 self._release_pending = True
+                self._handsfree_at = self.clock()
                 self._emit("recording", locked=True)
             return "locked"
 
@@ -471,6 +484,10 @@ def main(_argv: Sequence[str] | None = None) -> int:
         event_sink=emit_event,
         tap_discard_seconds=float(dictation.get("tap_discard_ms", 1000)) / 1000.0,
         max_recording_seconds=float(dictation.get("max_recording_seconds", 90)),
+        handsfree_release_grace_seconds=float(
+            dictation.get("handsfree_release_grace_ms", 1000)
+        )
+        / 1000.0,
     )
 
     def terminate(_signum: int, _frame: Any) -> None:
