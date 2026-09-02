@@ -9,6 +9,7 @@ can terminate what is still running on shutdown, takeover, or overflow.
 from __future__ import annotations
 
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -161,13 +162,22 @@ class TrackedProcess:
     signal in the TERM-to-KILL sequence can land on a reused id.
     """
 
-    def __init__(self, process: subprocess.Popen[bytes], argv: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        argv: tuple[str, ...],
+        *,
+        keep_descendants: bool = False,
+    ) -> None:
         self.process = process
         self.argv = argv
         self.started_at = time.monotonic()
         self._lock = threading.Lock()
         self.terminated = False
         self.reaped = False
+        # A helper such as wl-copy legitimately leaves a serving child behind;
+        # reaping then must not sweep the group. Explicit termination still does.
+        self.keep_descendants = keep_descendants
 
     @property
     def pid(self) -> int:
@@ -217,7 +227,7 @@ class TrackedProcess:
         with self._lock:
             if self.reaped:
                 return
-            if not self.terminated and self.live_members():
+            if not self.terminated and not self.keep_descendants and self.live_members():
                 # The leader is gone but descendants stayed in the group.
                 self.terminated = True
                 escalate = True
@@ -370,15 +380,253 @@ def _join_with_deadline(readers: Sequence[_BoundedReader], deadline: float) -> b
     return True
 
 
+# --------------------------------------------------------------- Environment
+#
+# Children never inherit the daemon's environment. Every helper gets a fixed
+# allowlist of session variables plus a short per-program list, so loader and
+# interpreter startup variables (LD_*, PYTHON*, BASH_ENV, NODE_OPTIONS, ...),
+# unrelated credentials, and the daemon's own switches never reach a helper.
+
+ENV_VALUE_LIMIT = 8192
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+BASE_ENVIRONMENT: frozenset[str] = frozenset(
+    {
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "LANGUAGE",
+        "TZ",
+        "TMPDIR",
+        "XDG_RUNTIME_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_CONFIG_DIRS",
+        "XDG_DATA_HOME",
+        "XDG_DATA_DIRS",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        "XDG_SESSION_TYPE",
+        "XDG_SESSION_ID",
+        "XDG_CURRENT_DESKTOP",
+        "WAYLAND_DISPLAY",
+        "DISPLAY",
+        "XAUTHORITY",
+        "HYPRLAND_INSTANCE_SIGNATURE",
+        "DBUS_SESSION_BUS_ADDRESS",
+    }
+)
+BASE_ENVIRONMENT_PREFIXES: tuple[str, ...] = ("LC_",)
+
+# Per-program additions, keyed by the helper's basename. A trailing
+# underscore denotes a prefix.
+PROGRAM_ENVIRONMENT: dict[str, tuple[str, ...]] = {
+    "omarchy": ("OMARCHY_",),
+    "omarchy-shell": ("OMARCHY_",),
+    "herdr": ("HERDR_",),
+    "agent-browser": (
+        "AGENT_BROWSER_",
+        "OZONE_PLATFORM",
+        "ELECTRON_OZONE_PLATFORM_HINT",
+        "GDK_BACKEND",
+        "GDK_SCALE",
+        "QT_QPA_PLATFORM",
+        "XCURSOR_SIZE",
+        "XCURSOR_THEME",
+        "HYPRCURSOR_SIZE",
+        "HYPRCURSOR_THEME",
+    ),
+}
+
+
+def _allowed_name(name: str, allowed: frozenset[str], prefixes: tuple[str, ...]) -> bool:
+    return name in allowed or any(name.startswith(prefix) for prefix in prefixes)
+
+
+def _clean_value(name: str, value: str) -> str | None:
+    if not _ENV_NAME.match(name) or "\x00" in value or len(value) > ENV_VALUE_LIMIT:
+        return None
+    return value
+
+
+def _sanitized_path(value: str) -> str:
+    """Keep only absolute PATH entries whose directory chain is trusted."""
+    entries = [
+        entry
+        for entry in value.split(os.pathsep)
+        if entry and os.path.isabs(entry) and _trusted_directory(entry)
+    ]
+    return os.pathsep.join(entries)
+
+
+def child_environment(
+    programs: Sequence[str],
+    *,
+    extra: Mapping[str, str] | None = None,
+    source: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Build the minimal environment for a helper known under ``programs``.
+
+    ``programs`` lists the names the helper is known by (the requested argv[0]
+    and the resolved basename), so per-program additions apply whichever way
+    it was addressed. ``extra`` values are set by Omarvis itself for this one
+    command and are validated like everything else.
+    """
+    parent = os.environ if source is None else source
+    allowed = set(BASE_ENVIRONMENT)
+    prefixes = list(BASE_ENVIRONMENT_PREFIXES)
+    for program in programs:
+        for item in PROGRAM_ENVIRONMENT.get(os.path.basename(program), ()):
+            if item.endswith("_"):
+                prefixes.append(item)
+            else:
+                allowed.add(item)
+    frozen_allowed = frozenset(allowed)
+    frozen_prefixes = tuple(prefixes)
+    env: dict[str, str] = {}
+    for name, value in parent.items():
+        if not _allowed_name(name, frozen_allowed, frozen_prefixes):
+            continue
+        cleaned = _clean_value(name, value)
+        if cleaned is not None:
+            env[name] = cleaned
+    path = _sanitized_path(parent.get("PATH", ""))
+    if path:
+        env["PATH"] = path
+    for name, value in (extra or {}).items():
+        cleaned = _clean_value(name, str(value))
+        if cleaned is None:
+            raise ValueError(f"invalid environment entry {name!r}")
+        env[name] = cleaned
+    return env
+
+
+# ------------------------------------------------------------ Bound execution
+#
+# The executable is opened once, validated by fstat on that descriptor, and
+# executed through the descriptor (``/proc/self/fd/N``), so the file that
+# runs is exactly the file that was validated no matter what happens to the
+# pathname in between. Nothing runs in the child between fork and exec except
+# CPython's async-signal-safe C launcher: ``preexec_fn`` is never used, which
+# keeps spawning safe from every other thread in the daemon.
+
+SHEBANG_LIMIT = 256
+MAX_INPUT_BYTES = 1024 * 1024
+
+
+def _open_trusted_executable(path: str) -> int:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError as error:
+        raise ExecutableError(f"cannot open {path!r}: {error}") from error
+    try:
+        info = os.fstat(fd)
+        mode = stat.S_IMODE(info.st_mode)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or not _trusted_owner(info)
+            or mode & 0o022
+            or not mode & 0o111
+        ):
+            raise ExecutableError(f"{path!r} is not a trusted executable")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+@dataclass(frozen=True)
+class BoundExecutable:
+    """A validated executable held open, plus the argv that runs it."""
+
+    argv: tuple[str, ...]
+    fd: int
+    path: str
+    interpreter: str | None = None
+
+    @property
+    def executable(self) -> str:
+        return f"/proc/self/fd/{self.fd}"
+
+    def close(self) -> None:
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+
+
+def bind_executable(argv: Sequence[str]) -> BoundExecutable:
+    """Resolve ``argv[0]`` and hold the exact file (or interpreter) to run.
+
+    ELF programs run straight from their descriptor. For ``#!`` scripts the
+    interpreter is what runs from a descriptor, with the script's validated
+    absolute path passed as its argument, exactly as the kernel would (bash
+    scripts such as ``omarchy`` rely on that path to find their own files).
+    """
+    if not argv:
+        raise ExecutableError("empty command")
+    path = resolve_executable(argv[0])
+    fd = _open_trusted_executable(path)
+    try:
+        head = os.pread(fd, SHEBANG_LIMIT, 0)
+    except OSError as error:
+        os.close(fd)
+        raise ExecutableError(f"cannot read {path!r}: {error}") from error
+    if not head.startswith(b"#!"):
+        return BoundExecutable((argv[0], *argv[1:]), fd, path)
+    os.close(fd)
+    line, newline, _rest = head[2:].partition(b"\n")
+    if not newline:
+        raise ExecutableError(f"{path!r} has an unreadable interpreter line")
+    try:
+        text = line.decode("utf-8").strip()
+    except UnicodeDecodeError as error:
+        raise ExecutableError(f"{path!r} has an unreadable interpreter line") from error
+    parts = text.split(None, 1)
+    if not parts or not parts[0].startswith("/"):
+        raise ExecutableError(f"{path!r} names no absolute interpreter")
+    interpreter = resolve_executable(parts[0])
+    ifd = _open_trusted_executable(interpreter)
+    if os.pread(ifd, 2, 0) == b"#!":
+        os.close(ifd)
+        raise ExecutableError(f"{path!r} chains interpreters")
+    argument = (parts[1].strip(),) if len(parts) > 1 and parts[1].strip() else ()
+    return BoundExecutable(
+        (parts[0], *argument, path, *argv[1:]), ifd, path, interpreter=interpreter
+    )
+
+
+def _feed_stdin(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    try:
+        while view:
+            try:
+                written = os.write(fd, view)
+            except InterruptedError:
+                continue
+            view = view[written:]
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def execute_process(
     argv: Sequence[str],
     *,
     timeout: float,
     kill_on_timeout: bool,
     stdout_limit: int,
-    env: Mapping[str, str] | None = None,
+    extra_env: Mapping[str, str] | None = None,
     supervisor: ProcessSupervisor | None = None,
     stdin: int | None = subprocess.DEVNULL,
+    input: bytes | None = None,
+    keep_descendants: bool = False,
+    capture_output: bool = True,
 ) -> ExecutionResult:
     """Run ``argv`` in its own process group with streamed, capped output.
 
@@ -386,53 +634,63 @@ def execute_process(
     timeout or output overflow. Detached callers get ``started=True`` once the
     timeout passes; the child keeps running, its output is drained and
     discarded from then on, and the supervisor can still terminate it later.
+    ``input`` is written to the child's stdin from a helper thread so secrets
+    and transcripts never travel in argv. With ``capture_output=False`` both
+    output streams go to /dev/null and only the leader's exit is awaited,
+    which is what a helper that forks a long-lived server (wl-copy) needs.
     """
     registry = supervisor or DEFAULT_SUPERVISOR
     argv = list(argv)
-    if not argv:
-        raise ExecutableError("empty command")
-    executable = resolve_executable(argv[0])
-    expected = os.stat(executable)
-
-    def bind_executable() -> None:
-        # Runs in the child just before exec: refuse if the validated file was
-        # swapped between resolution and execution.
-        try:
-            current = os.stat(executable)
-        except OSError:
-            os._exit(126)
-        if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
-            os._exit(126)
-
-    process = subprocess.Popen(
-        argv,
-        executable=executable,
-        stdin=stdin,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-        close_fds=True,
-        preexec_fn=bind_executable,
-        env=dict(env) if env is not None else None,
-    )
-    tracked = TrackedProcess(process, tuple(argv))
+    if input is not None and len(input) > MAX_INPUT_BYTES:
+        raise ValueError("stdin input exceeds the bounded size")
+    bound = bind_executable(argv)
+    env = child_environment((argv[0], bound.path), extra=extra_env)
+    feed_fd: int | None = None
+    if input is not None:
+        stdin, feed_fd = os.pipe()
+        os.set_inheritable(feed_fd, False)
+    try:
+        process = subprocess.Popen(
+            list(bound.argv),
+            executable=bound.executable,
+            stdin=stdin,
+            stdout=subprocess.PIPE if capture_output else subprocess.DEVNULL,
+            stderr=subprocess.PIPE if capture_output else subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+            pass_fds=(bound.fd,),
+            env=env,
+        )
+    except BaseException:
+        if feed_fd is not None:
+            os.close(feed_fd)
+            os.close(stdin)  # type: ignore[arg-type]
+        raise
+    finally:
+        bound.close()
+    if feed_fd is not None:
+        os.close(stdin)  # type: ignore[arg-type]
+        threading.Thread(target=_feed_stdin, args=(feed_fd, input or b""), daemon=True).start()
+    tracked = TrackedProcess(process, tuple(argv), keep_descendants=keep_descendants)
     registry.register(tracked)
-    assert process.stdout is not None and process.stderr is not None
-    stdout_fd = os.dup(process.stdout.fileno())
-    stderr_fd = os.dup(process.stderr.fileno())
-    process.stdout.close()
-    process.stderr.close()
-    hard_cap = _hard_cap_for(stdout_limit)
-    readers = (
-        _BoundedReader(
-            stdout_fd, keep=stdout_limit, hard_cap=hard_cap, on_overflow=tracked.terminate
-        ),
-        _BoundedReader(
-            stderr_fd, keep=STDERR_KEEP, hard_cap=hard_cap, on_overflow=tracked.terminate
-        ),
-    )
-    for reader in readers:
-        reader.start()
+    readers: tuple[_BoundedReader, ...] = ()
+    if capture_output:
+        assert process.stdout is not None and process.stderr is not None
+        stdout_fd = os.dup(process.stdout.fileno())
+        stderr_fd = os.dup(process.stderr.fileno())
+        process.stdout.close()
+        process.stderr.close()
+        hard_cap = _hard_cap_for(stdout_limit)
+        readers = (
+            _BoundedReader(
+                stdout_fd, keep=stdout_limit, hard_cap=hard_cap, on_overflow=tracked.terminate
+            ),
+            _BoundedReader(
+                stderr_fd, keep=STDERR_KEEP, hard_cap=hard_cap, on_overflow=tracked.terminate
+            ),
+        )
+        for reader in readers:
+            reader.start()
 
     def finish(*, timed_out: bool) -> ExecutionResult:
         # After a kill the group is gone, but a pipe end inherited by something
@@ -440,8 +698,8 @@ def execute_process(
         # leave such readers draining in the background.
         if not _join_with_deadline(readers, time.monotonic() + TERMINATE_GRACE_SECONDS):
             tracked.terminate()
-        stdout = readers[0].text()[:stdout_limit]
-        stderr = readers[1].text()[:200]
+        stdout = readers[0].text()[:stdout_limit] if readers else ""
+        stderr = readers[1].text()[:200] if readers else ""
         for reader in readers:
             if reader.is_alive():
                 reader.discard()

@@ -239,3 +239,187 @@ def test_execute_process_refuses_untrusted_absolute_path(tmp_path) -> None:
     script.chmod(0o755)
     with pytest.raises(ExecutableError):
         execute_process([str(script)], timeout=2.0, kill_on_timeout=True, stdout_limit=10)
+
+
+# ------------------------------------------------- Fork safety and binding
+
+
+def test_spawning_never_runs_python_code_in_the_child() -> None:
+    import inspect
+
+    from omarvis import process
+
+    source = inspect.getsource(process)
+    # preexec_fn is the one Popen hook that runs Python between fork and
+    # exec; in a multithreaded daemon it can inherit a held lock and
+    # deadlock the child (and Popen itself) forever. It must never be used.
+    assert "preexec_fn=" not in source
+
+
+def test_concurrent_spawns_from_many_threads_never_deadlock() -> None:
+    import json
+    import logging
+    import threading
+
+    stop = threading.Event()
+    churn_lock = threading.Lock()
+    logger = logging.getLogger("omarvis.stress")
+    errors: list[BaseException] = []
+    results: list = []
+    results_lock = threading.Lock()
+
+    def churn() -> None:
+        # Hold locks and touch the allocator, logging, and json machinery
+        # continuously, the way the daemon's reader, web, and session
+        # threads do while another thread spawns a helper.
+        while not stop.is_set():
+            with churn_lock:
+                json.dumps({"n": list(range(50))})
+                logger.debug("churn %s", time.monotonic())
+
+    def forker() -> None:
+        while not stop.is_set():
+            subprocess.run(["true"], check=False)
+
+    def worker() -> None:
+        try:
+            for _ in range(12):
+                result = execute_process(
+                    ["sh", "-c", "echo ok"], timeout=20.0, kill_on_timeout=True, stdout_limit=100
+                )
+                with results_lock:
+                    results.append(result)
+        except BaseException as error:  # noqa: BLE001 - surfaced by the assertion
+            errors.append(error)
+
+    background = [threading.Thread(target=churn, daemon=True) for _ in range(3)]
+    background.append(threading.Thread(target=forker, daemon=True))
+    workers = [threading.Thread(target=worker, daemon=True) for _ in range(8)]
+    for thread in background + workers:
+        thread.start()
+    deadline = time.monotonic() + 90.0
+    for thread in workers:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    stop.set()
+    for thread in background:
+        thread.join(5.0)
+
+    assert not any(thread.is_alive() for thread in workers), "a spawn deadlocked"
+    assert errors == []
+    assert len(results) == 96
+    assert all(result.stdout == "ok\n" and result.exit_code == 0 for result in results)
+
+
+def test_execution_is_bound_to_the_validated_file_not_the_pathname(tmp_path, monkeypatch) -> None:
+    import os
+    import shutil
+
+    from omarvis import process
+
+    program = tmp_path / "program"
+    shutil.copy("/usr/bin/true", program)
+    program.chmod(0o755)
+    monkeypatch.setattr(process, "resolve_executable", lambda name, **_kwargs: str(program))
+    real_popen = process.subprocess.Popen
+
+    def swapping_popen(*args, **kwargs):
+        # Between validation and exec the pathname is pointed at a different
+        # program. The validated descriptor is what runs, so `true` must win.
+        replacement = tmp_path / "replacement"
+        shutil.copy("/usr/bin/false", replacement)
+        replacement.chmod(0o755)
+        os.replace(replacement, program)
+        assert kwargs["executable"].startswith("/proc/self/fd/")
+        assert "preexec_fn" not in kwargs
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(process.subprocess, "Popen", swapping_popen)
+
+    result = execute_process([str(program)], timeout=5.0, kill_on_timeout=True, stdout_limit=10)
+
+    assert result.exit_code == 0
+
+
+def test_scripts_run_through_a_bound_interpreter_with_their_real_path(tmp_path, monkeypatch) -> None:
+    from omarvis import process
+
+    script = tmp_path / "tool"
+    script.write_text('#!/bin/bash\necho "$0" "$1" "$BASH_SOURCE"\n')
+    script.chmod(0o755)
+    real_resolve = process.resolve_executable
+    monkeypatch.setattr(
+        process,
+        "resolve_executable",
+        lambda name, **kwargs: str(script) if name == str(script) else real_resolve(name, **kwargs),
+    )
+
+    bound = process.bind_executable([str(script), "arg"])
+    try:
+        assert bound.interpreter is not None and bound.interpreter.endswith("bash")
+        assert bound.argv == ("/bin/bash", str(script), "arg")
+    finally:
+        bound.close()
+    result = execute_process([str(script), "arg"], timeout=5.0, kill_on_timeout=True, stdout_limit=300)
+
+    # Scripts such as `omarchy` locate their own files via $BASH_SOURCE, so
+    # the interpreter gets the validated absolute path, as the kernel would.
+    assert result.stdout == f"{script} arg {script}\n"
+
+
+def test_children_get_only_the_allowlisted_environment(monkeypatch) -> None:
+    import pytest
+
+    from omarvis.process import child_environment
+
+    monkeypatch.setenv("OMARVIS_TEST_SECRET", "hunter2")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/nonexistent")
+    monkeypatch.setenv("PYTHONSTARTUP", "/nonexistent")
+    monkeypatch.setenv("OMARCHY_PROBE", "yes")
+    monkeypatch.setenv("HERDR_PROBE", "yes")
+    monkeypatch.setenv("AGENT_BROWSER_PROBE", "yes")
+
+    result = execute_process(["env"], timeout=5.0, kill_on_timeout=True, stdout_limit=64_000)
+    names = {line.split("=", 1)[0] for line in result.stdout.splitlines()}
+
+    assert result.exit_code == 0
+    assert "PATH" in names and "HOME" in names
+    for leaked in ("OMARVIS_TEST_SECRET", "LD_LIBRARY_PATH", "PYTHONSTARTUP", "OMARCHY_PROBE", "HERDR_PROBE", "AGENT_BROWSER_PROBE"):
+        assert leaked not in names
+
+    env = child_environment(("omarchy",), extra={"OMARCHY_SCREENSHOT_DIR": "/cache"})
+    assert env["OMARCHY_PROBE"] == "yes" and env["OMARCHY_SCREENSHOT_DIR"] == "/cache"
+    assert "HERDR_PROBE" not in env and "OMARVIS_TEST_SECRET" not in env
+    assert "HERDR_PROBE" in child_environment(("herdr", "/home/x/.local/bin/herdr"))
+    assert "AGENT_BROWSER_PROBE" in child_environment(("/state/agent-browser/agent-browser",))
+    # PATH keeps only absolute, trusted entries; relative and shared-writable ones go.
+    path = child_environment(("x",), source={"PATH": "/usr/bin:relative:/tmp"})["PATH"]
+    assert path.split(":")[0] == "/usr/bin" and "relative" not in path
+    with pytest.raises(ValueError):
+        child_environment(("x",), extra={"BAD NAME": "1"})
+    with pytest.raises(ValueError):
+        child_environment(("x",), extra={"X": "a\x00b"})
+
+
+def test_input_reaches_the_child_over_stdin() -> None:
+    result = execute_process(
+        ["cat"], timeout=5.0, kill_on_timeout=True, stdout_limit=100, input=b"secret words"
+    )
+
+    assert (result.exit_code, result.stdout) == (0, "secret words")
+
+
+def test_keep_descendants_leaves_a_forked_server_alive() -> None:
+    marker = "sleep 38.5"
+    result = execute_process(
+        ["bash", "-c", f"(exec >/dev/null 2>&1; {marker}) & exit 0"],
+        timeout=5.0,
+        kill_on_timeout=True,
+        stdout_limit=10,
+        keep_descendants=True,
+        capture_output=False,
+    )
+    try:
+        assert result.exit_code == 0
+        assert _live_pids(f"^{marker}$") != []
+    finally:
+        subprocess.run(["pkill", "-f", f"^{marker}$"], check=False)

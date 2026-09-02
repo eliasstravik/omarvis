@@ -1,9 +1,11 @@
 import json
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).parent.parent
 SHIPPED = (
-    *sorted((ROOT / "omarvis").glob("*.py")),
+    *sorted(path for path in (ROOT / "omarvis").glob("*.py") if path.name != "setupfiles.py"),
     *sorted(ROOT.glob("*.qml")),
     *sorted(path for path in (ROOT / "bin").iterdir() if path.name != "omarvis-setup"),
     ROOT / "assets" / "web" / "index.html",
@@ -11,8 +13,9 @@ SHIPPED = (
     ROOT / "qmldir",
     ROOT / "agent" / "prompt.md",
 )
-# Everything Ask mode and the typed one-shot left behind. bin/omarvis-setup is
-# excluded above because it names these on purpose, to delete stale bindings.
+# Everything Ask mode and the typed one-shot left behind. bin/omarvis-setup and
+# omarvis/setupfiles.py are excluded above because they name these on purpose,
+# to delete stale bindings and config keys.
 RETIRED = (
     "text_only",
     "--text-only",
@@ -45,83 +48,117 @@ def test_the_retired_entry_points_are_deleted():
     assert not (ROOT / "BarWidget.qml").exists()
 
 
-def test_setup_unbinds_super_j_before_installing_press_and_release_pair():
-    script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
 
-    assert "DICTATE_UNBIND='hl.unbind(\"SUPER + J\")'" in script
-    migration = script.index('missing_bindings+=("$DICTATE_UNBIND"')
-    assert migration < script.index("printf '%s\\n' \"${missing_bindings[@]}\"")
-    assert "needs_dictation_rebind=true" in script
-    assert "sed -i" in script
+def test_setup_unbinds_super_j_before_installing_press_and_release_pair():
+    from omarvis import setupfiles
+
+    assert setupfiles.DICTATE_UNBIND == 'hl.unbind("SUPER + J")'
+    # Any install without the submap gets the whole dictation unit rewritten:
+    # the pre-submap pair is deleted, then unbind + pair + submaps appended.
+    plan = setupfiles.plan_bindings(
+        'o.bind("SUPER + J", "Omarvis Dictate", "omarchy-shell omarvis dictate start")\n'
+        'o.bind("SUPER + J", "Omarvis Dictate Stop", "omarchy-shell omarvis dictate stop", { release = true })\n'
+    )
+    assert plan.rebind_dictation
+    start = plan.missing.index(setupfiles.DICTATE_UNBIND)
+    assert plan.missing[start : start + len(setupfiles.DICTATION_UNIT)] == setupfiles.DICTATION_UNIT
+    updated = setupfiles.apply_plan("keep me\n" + 'hl.unbind("SUPER + J")\n', plan)
+    assert updated.startswith("keep me\n")
+    assert updated.count('hl.unbind("SUPER + J")') == 1
+    assert updated.index('hl.unbind("SUPER + J")') < updated.index(setupfiles.DICTATE_START_BINDING)
+
 
 
 def test_setup_removes_retired_ask_and_text_bindings():
-    script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
+    from omarvis import setupfiles
 
+    script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
     # Ask mode and the typed one-shot no longer exist. Setup must not offer
     # them, and must delete whatever an older install left behind.
-    assert "ASK_BINDING" not in script
-    assert "TEXT_BINDING" not in script
-    assert "has_retired_bindings=true" in script
-    assert (
-        r"""sed -i -E '/omarvis (toggle|toggleMode) ask"|\/bin\/omarvis-text"/d'"""
-        in script
+    assert "ASK_BINDING" not in script and "TEXT_BINDING" not in script
+    assert not hasattr(setupfiles, "ASK_BINDING")
+    stale = (
+        'o.bind("SUPER + SHIFT + J", "Omarvis Ask", "omarchy-shell omarvis toggle ask")\n'
+        'o.bind("SUPER + ALT + J", "Omarvis Text", "~/.config/omarchy/plugins/x/bin/omarvis-text")\n'
     )
-    assert "del(.ask_agent_id)" in script
-    assert "ask_agent_id: (" not in script
+    plan = setupfiles.plan_bindings(stale)
+    assert plan.retired
+    assert "omarvis-text" not in setupfiles.apply_plan(stale, plan)
+    assert 'toggle ask"' not in setupfiles.apply_plan(stale, plan)
+    merged = setupfiles.merged_config(
+        {"ask_agent_id": "old", "vision": {"x": 1}, "agent_id": "a"},
+        browser_mode="unavailable",
+        agent_browser_path="",
+        browser_executable_path="",
+    )
+    assert "ask_agent_id" not in merged and "vision" not in merged
+
 
 
 def test_setup_offers_only_the_surviving_bindings():
-    script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
+    from omarvis import setupfiles
 
-    for binding in (
-        "AGENT_BINDING",
-        "DICTATE_START_BINDING",
-        "DICTATE_STOP_BINDING",
-        "PANEL_BINDING",
-    ):
-        assert f"{binding}=" in script
     # SUPER+SHIFT+J was freed by the Ask removal and now toggles remote
     # access; SUPER+ALT+J (freed by the typed one-shot's removal) opens the
     # panel — SUPER+ALT is Omarchy's most common two-modifier tier, and the
     # stock config never stacks CTRL+ALT.
-    assert 'o.bind("SUPER + SHIFT + J", "Omarvis Remote", "omarchy-shell omarvis toggleRemote")' in script
-    assert 'o.bind("SUPER + ALT + J", "Omarvis Panel", "omarchy-shell omarvis panel")' in script
-    assert "SUPER + CTRL + ALT + J" not in script
+    assert setupfiles.REMOTE_BINDING == (
+        'o.bind("SUPER + SHIFT + J", "Omarvis Remote", "omarchy-shell omarvis toggleRemote")'
+    )
+    assert setupfiles.PANEL_BINDING == (
+        'o.bind("SUPER + ALT + J", "Omarvis Panel", "omarchy-shell omarvis panel")'
+    )
+    assert all("SUPER + CTRL + ALT + J" not in binding for binding in setupfiles.ALL_BINDINGS)
+    assert setupfiles.plan_bindings("\n".join(setupfiles.ALL_BINDINGS)).changes is False
+
 
 
 def test_setup_removes_legacy_external_vision_configuration():
     script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
+    module = (Path(__file__).parent.parent / "omarvis" / "setupfiles.py").read_text()
 
-    assert "del(.vision)" in script
-    assert "anthropic" not in script.lower()
-    assert "vision_api_key" not in script
+    assert '"vision"' in module
+    assert "anthropic" not in (script + module).lower()
+    assert "vision_api_key" not in script + module
+
 
 
 def test_setup_defaults_the_agent_to_the_omarvis_voice():
-    script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
+    from omarvis.setupfiles import merged_config
 
-    assert 'voice_id: (.voice_id // "JSWO6cw2AyFE324d5kEr")' in script
+    merged = merged_config({}, browser_mode="unavailable", agent_browser_path="", browser_executable_path="")
+    assert merged["voice_id"] == "JSWO6cw2AyFE324d5kEr"
+
 
 
 def test_setup_pins_metered_audio_sdk_and_preserves_ui_defaults():
-    script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
+    from omarvis.setupfiles import merged_config
 
     # The SDK pin moved into the hash lock's top-level input.
     assert "elevenlabs==2.65.0" in (ROOT / "requirements.in").read_text()
     # Sounds are gone for good: no earcons default, and setup prunes the
-    # stale key from existing configs.
-    assert "del(.earcons)" in script
-    assert "earcons: (" not in script
-    assert 'hud_position: (.ui.hud_position // "top-center")' in script
+    # stale key from existing configs while keeping the user's other values.
+    merged = merged_config(
+        {"ui": {"earcons": True, "hud_position": "bottom-center"}, "herdr_announcements": False},
+        browser_mode="unavailable",
+        agent_browser_path="",
+        browser_executable_path="",
+    )
+    assert merged["ui"] == {"hud_position": "bottom-center"}
+    assert merged["herdr_announcements"] is False
+    assert merged_config({}, browser_mode="x", agent_browser_path="", browser_executable_path="")["ui"] == {
+        "hud_position": "top-center"
+    }
+
 
 
 def test_setup_installs_qrcode_without_pillow_and_sets_web_port():
-    script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
+    from omarvis.setupfiles import merged_config
 
     assert "qrcode==8.2" in (ROOT / "requirements.in").read_text()
     assert "pillow" not in (ROOT / "requirements.lock").read_text().lower()
-    assert "web_port: (.web_port // 4763)" in script
+    merged = merged_config({}, browser_mode="x", agent_browser_path="", browser_executable_path="")
+    assert merged["web_port"] == 4763
 
 
 def test_setup_requires_wayland_clipboard_support():
@@ -130,16 +167,20 @@ def test_setup_requires_wayland_clipboard_support():
     assert "need_command wl-copy" in script
 
 
-def test_setup_installs_native_panel_keybinding():
-    script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
 
-    assert 'PANEL_BINDING=' in script
-    assert 'SUPER + ALT + J' in script
-    assert 'omarchy-shell omarvis panel' in script
-    assert 'missing_bindings+=("$PANEL_BINDING")' in script
+def test_setup_installs_native_panel_keybinding():
+    from omarvis import setupfiles
+
+    assert "SUPER + ALT + J" in setupfiles.PANEL_BINDING
+    assert "omarchy-shell omarvis panel" in setupfiles.PANEL_BINDING
+    plan = setupfiles.plan_bindings("")
+    assert setupfiles.PANEL_BINDING in plan.missing
+
 
 
 def test_setup_teaches_key_creation_and_validates_the_needed_scope():
+    from omarvis import setupfiles
+
     script = (Path(__file__).parent.parent / "bin" / "omarvis-setup").read_text()
 
     # The key prompt must carry its own instructions: where to create the
@@ -151,10 +192,15 @@ def test_setup_teaches_key_creation_and_validates_the_needed_scope():
     assert "ElevenLabs shows it only once" in script
     # Validation exercises the exact scope provisioning needs (listing
     # agents), so an under-scoped key fails at the prompt, not phases later.
-    assert "api.elevenlabs.io/v1/convai/agents" in script
-    assert "xi-api-key" in script
-    assert "missing_permissions" in script
-    assert "need_command curl" in script
+    assert setupfiles.KEY_CHECK_URL.startswith("https://api.elevenlabs.io/v1/convai/agents")
+    assert "missing_permissions" in (ROOT / "omarvis" / "setupfiles.py").read_text()
+    # The key reaches the helper on stdin and leaves it as a request header:
+    # no curl, no key in any argv, no shell variable interpolated into a
+    # command line.
+    assert "curl" not in script
+    assert "xi-api-key" not in script
+    assert "printf '%s' \"$1\" | setupfiles check-key" in script
+    assert "printf '%s' \"$1\" | setupfiles store-key" in script
 
 
 def test_setup_asks_everything_up_front_then_runs_unattended():
@@ -226,10 +272,14 @@ def test_readme_headlines_remote_risk_and_data_flows():
     assert "nothing is sent while idle" in readme
 
 
+
 def test_setup_installs_only_locked_verified_artifacts():
     # The marketplace review binds runtime authorization to the reviewed
-    # commit, so every registry artifact setup fetches must be exactly
-    # pinned and hash-verified by files in this repository.
+    # commit, so every artifact setup fetches must be exactly pinned and
+    # digest-verified by files in this repository, and no package-manager
+    # lifecycle script or unpinned installer may run.
+    from omarvis import setupfiles
+
     script = (ROOT / "bin" / "omarvis-setup").read_text(encoding="utf-8")
 
     # Python: the venv is built from the full transitive lock, and pip
@@ -245,13 +295,33 @@ def test_setup_installs_only_locked_verified_artifacts():
     assert any(line.startswith("qrcode==8.2") for line in pins)
     assert lock.count("--hash=sha256:") >= len(pins)
 
-    # npm: agent-browser comes from the committed integrity lock via npm ci
-    # into the plugin's own state dir — never a mutable global install.
-    assert "npm install -g" not in script
-    assert "npm ci" in script
-    pkg = json.loads((ROOT / "npm" / "package.json").read_text(encoding="utf-8"))
-    npm_lock = json.loads((ROOT / "npm" / "package-lock.json").read_text(encoding="utf-8"))
-    assert pkg["dependencies"]["agent-browser"] == "0.34.0"
-    locked = npm_lock["packages"]["node_modules/agent-browser"]
-    assert locked["version"] == "0.34.0"
-    assert locked["integrity"].startswith("sha512-")
+    # agent-browser: the native binary is taken out of the pinned npm
+    # tarball by the setup helper. npm itself never runs (so neither does
+    # the package's postinstall, which would fetch an unverified binary from
+    # a GitHub release URL), no managed browser is ever downloaded, and both
+    # the tarball and the extracted binary are verified against digests in
+    # the repository.
+    assert "npm ci" not in script and "npm install" not in script and "need_command npm" not in script
+    assert "agent-browser install" not in script
+    assert "setupfiles fetch-agent-browser" in script
+    assert "setupfiles fetch-elevenlabs-client" in script
+    assert not (ROOT / "npm").exists()
+    assert setupfiles.AGENT_BROWSER_VERSION == "0.34.0"
+    assert setupfiles.AGENT_BROWSER_URL == (
+        "https://registry.npmjs.org/agent-browser/-/agent-browser-0.34.0.tgz"
+    )
+    assert len(setupfiles.AGENT_BROWSER_TARBALL_SHA256) == 64
+    import base64
+
+    assert len(base64.b64decode(setupfiles.AGENT_BROWSER_TARBALL_SHA512_B64)) == 64
+    for arch in ("x86_64", "aarch64"):
+        artifact = setupfiles.agent_browser_artifact(arch)
+        assert artifact.member.startswith("package/bin/agent-browser-linux-")
+        assert len(artifact.member_sha256) == 64
+        assert artifact.mode == 0o755
+    with pytest.raises(setupfiles.SetupError):
+        setupfiles.agent_browser_artifact("mips")
+    # Chromium, when missing, comes from the distribution's signed repository.
+    assert "omarchy pkg add chromium" in script
+
+

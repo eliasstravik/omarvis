@@ -20,7 +20,7 @@ omarchy plugin add https://github.com/eliasstravik/omarvis.git --enable --yes
 ~/.config/omarchy/plugins/io.github.eliasstravik.omarvis/bin/omarvis-setup
 ```
 
-Setup asks all its questions first, then runs unattended: it installs PortAudio, PyAudio, the ElevenLabs SDK, and agent-browser, and creates its runtime files under `~/.config/omarchy/omarvis/` and `~/.local/share/omarvis/`. The terminal shows one line per phase; full subprocess output goes to `~/.local/share/omarvis/setup.log`. For automation, `omarvis-setup --yes` answers every prompt with yes (it then requires `ELEVENLABS_API_KEY` in the environment on a first run).
+Setup asks all its questions first, then runs unattended: it installs PortAudio, PyAudio, the ElevenLabs SDK, and the agent-browser native binary (from its pinned, digest-verified tarball), and creates its runtime files under `~/.config/omarchy/omarvis/` and `~/.local/share/omarvis/`. The terminal shows one line per phase; full subprocess output goes to `~/.local/share/omarvis/setup.log`. For automation, `omarvis-setup --yes` answers every prompt with yes (it then requires `ELEVENLABS_API_KEY` in the environment on a first run).
 
 ## 2. Paste your ElevenLabs key
 

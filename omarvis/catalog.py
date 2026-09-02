@@ -638,6 +638,9 @@ def hyprland_prompt() -> str:
     return "\n".join(lines)
 
 
+PROFILE_FILE_LIMIT = 256 * 1024
+
+
 def profile_memory(config: Mapping[str, Any] | None = None, *, limit: int = 2000) -> str:
     path = Path(
         os.path.expanduser(
@@ -647,10 +650,13 @@ def profile_memory(config: Mapping[str, Any] | None = None, *, limit: int = 2000
             )
         )
     )
+    # A predictable pathname inside the private config directory: read it
+    # through its directory descriptor, no-follow, and bounded.
     try:
-        return path.read_text(errors="replace")[:limit]
-    except OSError:
+        raw = read_private_path(path, limit=PROFILE_FILE_LIMIT, private=False)
+    except (OSError, PrivateFileError):
         return ""
+    return (raw or b"").decode("utf-8", "replace")[:limit]
 
 
 def catalog_variables(

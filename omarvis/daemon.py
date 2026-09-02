@@ -121,15 +121,17 @@ class RunToolHandler:
         kill_on_timeout: bool,
         stdout_limit: int,
     ) -> ExecutionResult:
-        env = None
+        # Helpers get the fixed per-program environment allowlist from
+        # execute_process; the only value Omarvis adds is the browser binary
+        # agent-browser should drive.
+        extra_env: dict[str, str] = {}
         browser_path = str(self.config.get("agent_browser_path") or "agent-browser")
         if (
             argv
             and argv[0] == browser_path
             and self.config.get("browser_executable_path")
         ):
-            env = os.environ.copy()
-            env["AGENT_BROWSER_EXECUTABLE_PATH"] = str(
+            extra_env["AGENT_BROWSER_EXECUTABLE_PATH"] = str(
                 self.config["browser_executable_path"]
             )
         return execute_process(
@@ -137,7 +139,7 @@ class RunToolHandler:
             timeout=timeout,
             kill_on_timeout=kill_on_timeout,
             stdout_limit=stdout_limit,
-            env=env,
+            extra_env=extra_env,
             supervisor=self.supervisor,
         )
 

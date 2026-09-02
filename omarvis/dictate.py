@@ -48,7 +48,13 @@ def _capped_run(argv: Sequence[str], **options: Any) -> Any:
     """subprocess.run stand-in that streams output through the capped runner."""
     timeout = float(options.get("timeout") or 10.0)
     result = execute_process(
-        list(argv), timeout=timeout, kill_on_timeout=True, stdout_limit=64_000
+        list(argv),
+        timeout=timeout,
+        kill_on_timeout=True,
+        stdout_limit=64_000,
+        input=options.get("input"),
+        keep_descendants=bool(options.get("keep_descendants")),
+        capture_output=options.get("stdout") is not subprocess.DEVNULL,
     )
     if result.timed_out:
         raise subprocess.TimeoutExpired(list(argv), timeout)
@@ -89,20 +95,12 @@ def inject_text(
         return
     # Give wl-copy a beat to take clipboard ownership before the paste lands.
     sleeper(0.1)
-    # Only the window probe captures output; the paste and clipboard helpers
-    # write nothing back, so they keep the plain runner with /dev/null stdio.
     if active_window_is_terminal(runner or _capped_run):
         argv = ["wtype", "-M", "ctrl", "-M", "shift", "-P", "v", "-p", "v",
                 "-m", "shift", "-m", "ctrl"]
     else:
         argv = ["wtype", "-M", "ctrl", "-P", "v", "-p", "v", "-m", "ctrl"]
-    (runner or subprocess.run)(
-        argv,
-        check=True,
-        timeout=10,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    (runner or _capped_run)(argv, check=True, timeout=10)
 
 
 def copy_to_clipboard(
@@ -110,14 +108,21 @@ def copy_to_clipboard(
     *,
     runner: Callable[..., Any] | None = None,
 ) -> None:
-    """Copy a transcript without letting clipboard ownership block dictation."""
+    """Copy a transcript without letting clipboard ownership block dictation.
+
+    The text travels over stdin, never in argv, so it is not visible in the
+    process list. wl-copy forks a serving child and exits; that child is the
+    clipboard owner and is deliberately left alive.
+    """
     try:
-        (runner or subprocess.run)(
-            ["wl-copy", "--", text],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        (runner or _capped_run)(
+            ["wl-copy"],
+            input=text.encode("utf-8"),
             timeout=5,
             check=False,
+            keep_descendants=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
     except Exception:  # noqa: BLE001 - clipboard history must never break typing
         pass

@@ -92,7 +92,7 @@ During a session: your microphone audio, your profile memory, the command catalo
 
 ### What does setup install?
 
-Two distro packages through `omarchy pkg add` (`portaudio` and `python-pyaudio`, plus `wtype` for dictation), a private Python virtualenv from a hash-locked `requirements.lock`, Omarvis's own copy of `agent-browser` 0.34.0 from a committed npm lockfile, and the sha256-pinned ElevenLabs browser client. Everything lands under `~/.local/share/omarvis` and `~/.config/omarchy/omarvis`. Remote access additionally needs Tailscale, which you install and sign in to yourself. The [reference](docs/reference.md#reproducible-install) lists every artifact and how it is verified.
+Two distro packages through `omarchy pkg add` (`portaudio` and `python-pyaudio`, plus `wtype` for dictation and `chromium` if you have no browser), a private Python virtualenv from a hash-locked `requirements.lock`, the `agent-browser` 0.34.0 native binary taken out of its pinned npm tarball and verified against committed sha256 digests (no npm, no install scripts), and the sha256-pinned ElevenLabs browser client. Everything lands under `~/.local/share/omarvis` and `~/.config/omarchy/omarvis`. Remote access additionally needs Tailscale, which you install and sign in to yourself. The [reference](docs/reference.md#reproducible-install) lists every artifact and how it is verified.
 
 ### How do I uninstall it?
 

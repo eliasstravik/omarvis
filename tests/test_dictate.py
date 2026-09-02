@@ -104,14 +104,18 @@ def test_clipboard_copy_uses_safe_argv_and_detaches_all_streams():
 
     copy_to_clipboard("--literal $HOME", runner=runner)
 
+    # The transcript travels on stdin, never in argv where every process on
+    # the machine could read it; wl-copy's serving child is left alive.
     assert calls == [
         (
-            ["wl-copy", "--", "--literal $HOME"],
+            ["wl-copy"],
             {
-                "stdout": subprocess.DEVNULL,
-                "stderr": subprocess.DEVNULL,
+                "input": b"--literal $HOME",
                 "timeout": 5,
                 "check": False,
+                "keep_descendants": True,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
             },
         )
     ]
@@ -142,7 +146,7 @@ def test_injector_failure_keeps_transcript_and_emits_one_idle(monkeypatch):
     events = []
     clipboard = []
     monkeypatch.setattr(
-        "omarvis.dictate.subprocess.run",
+        "omarvis.dictate._capped_run",
         lambda argv, **options: clipboard.append((argv, options)),
     )
     service = DictationService(
@@ -157,7 +161,8 @@ def test_injector_failure_keeps_transcript_and_emits_one_idle(monkeypatch):
     service.stop()
     service.wait()
 
-    assert clipboard[0][0] == ["wl-copy", "--", "recoverable words"]
+    assert clipboard[0][0] == ["wl-copy"]
+    assert clipboard[0][1]["input"] == b"recoverable words"
     assert {
         "event": "dictation",
         "state": "error",

@@ -4,6 +4,14 @@
 # unattended: one line per phase on the terminal, full subprocess output in
 # ~/.local/share/omarvis/setup.log. --yes answers every prompt with its
 # affirmative for unattended runs.
+#
+# This script only talks to the user and sequences the phases. Everything
+# that touches a file, a secret, or the network runs in omarvis/setupfiles.py
+# (standard library only, on the system python): descriptor-based no-follow
+# reads and atomic writes for every runtime file, the API key on stdin and
+# never in argv, HTTPS-only size-capped downloads verified against digests
+# committed in that module, a transactional bindings edit with reload
+# validation, and a journal that undoes a failed or crashed run.
 
 set -euo pipefail
 
@@ -15,32 +23,10 @@ PROFILE_PATH="$CONFIG_DIR/profile.md"
 STATE_DIR="$HOME/.local/share/omarvis"
 VENV_DIR="$STATE_DIR/venv"
 LOG_PATH="$STATE_DIR/setup.log"
-VENDOR_DIR="$STATE_DIR/vendor"
-# The phone page must never fetch third-party executable code at call time,
-# so setup downloads the ElevenLabs browser client (dist/lib.iife.js from the
-# published @elevenlabs/client npm package) once, verifies it against the
-# pinned digest, and omarvis-web serves the local copy.
-ELEVENLABS_CLIENT_VERSION="1.23.0"
-ELEVENLABS_CLIENT_FILE="elevenlabs-client-$ELEVENLABS_CLIENT_VERSION.iife.js"
-ELEVENLABS_CLIENT_URL="https://registry.npmjs.org/@elevenlabs/client/-/client-$ELEVENLABS_CLIENT_VERSION.tgz"
-ELEVENLABS_CLIENT_SHA256="b6adb12bd5df649af3ce3ac9205fd0e7d1c099513481c58bd1990f2d50903204"
+AGENT_BROWSER_DIR="$STATE_DIR/agent-browser"
+AGENT_BROWSER_PATH="$AGENT_BROWSER_DIR/agent-browser"
 BINDINGS_PATH="$HOME/.config/hypr/bindings.lua"
-AGENT_BINDING='o.bind("SUPER + CTRL + J", "Omarvis", "omarchy-shell omarvis toggle")'
-DICTATE_UNBIND='hl.unbind("SUPER + J")'
-DICTATE_START_BINDING='o.bind("SUPER + J", "Omarvis Dictate", "omarchy-shell omarvis dictate start")'
-# Holding SUPER+J enters a Hyprland submap so SPACE can chord into hands-free
-# without the global SUPER+SPACE menu binding firing; the universal release
-# binds stop the recording and leave the submap whichever map is active.
-DICTATE_SUBMAP_ENTER='hl.bind("SUPER + J", hl.dsp.submap("omarvis-dictate"))'
-DICTATE_STOP_BINDING='o.bind("SUPER + J", "Omarvis Dictate Stop", "omarchy-shell omarvis dictate stop", { release = true, submap_universal = true })'
-DICTATE_SUBMAP_LEAVE='hl.bind("SUPER + J", hl.dsp.submap("reset"), { release = true, submap_universal = true })'
-DICTATE_SUBMAP=$'hl.define_submap("omarvis-dictate", function()\n  o.bind("SUPER + SPACE", "Omarvis Hands-free", "omarchy-shell omarvis dictate handsfree")\n  o.bind("ESCAPE", "Omarvis Cancel", "omarchy-shell omarvis dictate cancel")\n  hl.bind("ESCAPE", hl.dsp.submap("reset"))\nend)'
-# Once the keys are up after a Space chord, the shell moves Hyprland into
-# this submap for as long as the recording stays open: SUPER+J sends and
-# ESCAPE discards, as static binds.
-HANDSFREE_SUBMAP=$'hl.define_submap("omarvis-handsfree", function()\n  o.bind("SUPER + J", "Omarvis Hands-free Send", "omarchy-shell omarvis dictate start")\n  hl.bind("SUPER + J", hl.dsp.submap("reset"))\n  o.bind("ESCAPE", "Omarvis Hands-free Cancel", "omarchy-shell omarvis dictate cancel")\n  hl.bind("ESCAPE", hl.dsp.submap("reset"))\nend)'
-PANEL_BINDING='o.bind("SUPER + ALT + J", "Omarvis Panel", "omarchy-shell omarvis panel")'
-REMOTE_BINDING='o.bind("SUPER + SHIFT + J", "Omarvis Remote", "omarchy-shell omarvis toggleRemote")'
+PLUGIN_ID="io.github.eliasstravik.omarvis"
 
 ASSUME_YES=false
 for argument in "$@"; do
@@ -84,19 +70,36 @@ die() {
   exit 1
 }
 
-# Subprocess chatter goes to the log; the terminal keeps one line per step.
-# On failure the log tail comes back, so nothing is ever hidden.
+# The file/network helper. -E -s -B: no PYTHON* environment influence, no
+# user site-packages, no bytecode written into the plugin checkout.
+setupfiles() {
+  (cd "$PLUGIN_DIR" && python -E -s -B -m omarvis.setupfiles "$@")
+}
+
+# Subprocess chatter goes to the log through the helper (the log is opened
+# no-follow inside its directory descriptor and size-capped); the terminal
+# keeps one line per step. On failure the log tail comes back, so nothing is
+# ever hidden.
 run_logged() {
   local description=$1
   shift
   printf '  %s·%s %s\n' "$DIM" "$RESET" "$description"
-  if "$@" >>"$LOG_PATH" 2>&1; then
+  local statuses code
+  if "$@" 2>&1 | setupfiles log; then
     return 0
   fi
-  local code=$?
+  statuses=("${PIPESTATUS[@]}")
+  code=${statuses[0]}
+  if (( code == 0 )); then
+    die "Could not write $LOG_PATH (exit ${statuses[1]})."
+  fi
   printf '%s %s failed (exit %s). Last lines of %s:\n' "$BAD" "$description" "$code" "$LOG_PATH" >&2
   tail -n 20 "$LOG_PATH" >&2
   exit "$code"
+}
+
+log_line() {
+  printf '%s\n' "$1" | setupfiles log
 }
 
 confirm() {
@@ -115,8 +118,6 @@ confirm() {
 # ---------------------------------------------------------------- Preflight
 
 printf '%sOmarvis setup%s\n' "$BOLD" "$RESET"
-mkdir -p "$STATE_DIR"
-printf '── omarvis-setup %s ──\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG_PATH"
 
 echo
 echo "Preflight:"
@@ -133,28 +134,42 @@ need_command omarchy
 need_command python
 need_command jq
 need_command wl-copy
-need_command curl
 if [[ $MISSING_REQUIRED == true ]]; then
   die "Install the missing commands above, then run omarvis-setup again."
 fi
+if ! python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+  die "Omarvis needs Python 3.11 or newer as the system python."
+fi
+
+# Runtime directories exist and are private before anything is written; the
+# log header goes through the same guarded path as everything else.
+setupfiles prepare || die "Could not create $STATE_DIR and $CONFIG_DIR as private directories."
+log_line "── omarvis-setup $(date '+%Y-%m-%d %H:%M:%S') ──"
+
+# A previous run that failed or was interrupted leaves a journal; undo its
+# changes before starting over so setup never builds on a half-applied state.
+if [[ $(setupfiles journal pending) == yes ]]; then
+  printf '  %s a previous setup run did not finish; restoring what it changed\n' "$WARN"
+  setupfiles recover 2>&1 | sed 's/^/    /'
+fi
+
+# On any failure from here on, undo this run's journaled changes (config,
+# bindings, plugin enablement) so the machine is back where it started.
+SETUP_DONE=false
+on_exit() {
+  local code=$?
+  if [[ $SETUP_DONE == true ]]; then
+    return
+  fi
+  if [[ $(setupfiles journal pending 2>/dev/null) == yes ]]; then
+    printf '\n%s Setup did not finish (exit %s); restoring the previous state:\n' "$WARN" "$code" >&2
+    setupfiles recover 2>&1 | sed 's/^/  /' >&2 || true
+  fi
+}
+trap on_exit EXIT
 
 HAVE_WTYPE=false
 command -v wtype >/dev/null 2>&1 && HAVE_WTYPE=true
-# Omarvis provisions its own agent-browser from the committed lockfile
-# (npm/package-lock.json, npm ci verifies integrity hashes) instead of a
-# mutable global install, so the reviewed plugin commit fully determines the
-# code that runs. A user's own global agent-browser is never touched or used.
-AGENT_BROWSER_DIR="$STATE_DIR/agent-browser"
-AGENT_BROWSER_PATH="$AGENT_BROWSER_DIR/node_modules/.bin/agent-browser"
-WILL_INSTALL_AGENT_BROWSER=false
-if command -v npm >/dev/null 2>&1; then
-  if [[ ! -x $AGENT_BROWSER_PATH ]] \
-    || ! cmp -s "$PLUGIN_DIR/npm/package-lock.json" "$AGENT_BROWSER_DIR/package-lock.json"; then
-    WILL_INSTALL_AGENT_BROWSER=true
-  fi
-elif [[ ! -x $AGENT_BROWSER_PATH ]]; then
-  AGENT_BROWSER_PATH=""
-fi
 
 BROWSER_EXECUTABLE=""
 for browser in chromium google-chrome google-chrome-stable chrome; do
@@ -164,15 +179,22 @@ for browser in chromium google-chrome google-chrome-stable chrome; do
   fi
 done
 
-BROWSER_MODE="unavailable"
-NEEDS_MANAGED_BROWSER=false
-if [[ -x $AGENT_BROWSER_PATH || $WILL_INSTALL_AGENT_BROWSER == true ]]; then
-  if [[ -n $BROWSER_EXECUTABLE ]] && [[ -d $HOME/.config/chromium/Default || -d $HOME/.config/google-chrome/Default ]]; then
-    BROWSER_MODE="real-profile"
-  else
-    BROWSER_MODE="omarvis-browser"
-    [[ -z $BROWSER_EXECUTABLE ]] && NEEDS_MANAGED_BROWSER=true
+# Browser control needs agent-browser (installed below from a pinned,
+# digest-verified tarball) and a Chromium. No managed browser is ever
+# downloaded: if none is installed, the distribution package is offered.
+INSTALL_CHROMIUM=false
+if [[ -z $BROWSER_EXECUTABLE ]]; then
+  echo
+  if confirm "Browser control needs Chromium. Install it with omarchy pkg add chromium?" y; then
+    INSTALL_CHROMIUM=true
   fi
+fi
+
+BROWSER_MODE="unavailable"
+if [[ -n $BROWSER_EXECUTABLE ]] && [[ -d $HOME/.config/chromium/Default || -d $HOME/.config/google-chrome/Default ]]; then
+  BROWSER_MODE="real-profile"
+elif [[ -n $BROWSER_EXECUTABLE || $INSTALL_CHROMIUM == true ]]; then
+  BROWSER_MODE="omarvis-browser"
 fi
 
 if [[ $HAVE_WTYPE == true ]]; then
@@ -184,14 +206,14 @@ if [[ $BROWSER_MODE == "real-profile" ]]; then
 elif [[ $BROWSER_MODE == "omarvis-browser" ]]; then
   printf '  %s browser control: own profile under ~/.local/share/omarvis/browser-profile (separate logins)\n' "$OK"
 else
-  printf '  %s browser control: disabled (npm is unavailable, so agent-browser cannot be installed)\n' "$WARN"
+  printf '  %s browser control: disabled (no Chromium; run omarvis-setup again after installing one)\n' "$WARN"
 fi
 
 echo
 echo "This run will:"
 note "• install packages: portaudio python-pyaudio"
-[[ $WILL_INSTALL_AGENT_BROWSER == true ]] && note "• install Omarvis's own agent-browser 0.34.0 under ~/.local/share/omarvis (npm ci from the committed lockfile)"
-[[ $NEEDS_MANAGED_BROWSER == true ]] && note "• install agent-browser's managed browser (no Chromium found)"
+[[ $INSTALL_CHROMIUM == true ]] && note "• install chromium from the distribution repositories"
+note "• install agent-browser 0.34.0 under ~/.local/share/omarvis (native binary from the pinned npm tarball, sha256-verified, no install scripts)"
 note "• create a Python environment in ~/.local/share/omarvis/venv"
 note "• create or update the \"Omarvis\" agent in your ElevenLabs account"
 note "• offer the J-key bindings for $BINDINGS_PATH (asked below; timestamped backup first)"
@@ -213,31 +235,20 @@ fi
 
 # The key is validated against the exact scope provisioning needs (listing
 # Agents Platform agents is free), so a mistyped or under-scoped key fails
-# right here at the prompt instead of three phases later.
-KEY_CHECK_URL="https://api.elevenlabs.io/v1/convai/agents?page_size=1"
+# right here at the prompt instead of three phases later. The key travels
+# to the helper on stdin and is sent as a request header from there; it is
+# never part of any command line.
 KEY_REJECTION=""
 
 # 0: valid  1: rejected (KEY_REJECTION says why)  2: could not reach the API
 validate_api_key() {
-  local key=$1 body http_code
-  body=$(mktemp)
-  if ! http_code=$(curl -sS --max-time 15 -o "$body" -w '%{http_code}' \
-      -H "xi-api-key: $key" "$KEY_CHECK_URL" 2>>"$LOG_PATH"); then
-    rm -f "$body"
-    return 2
-  fi
-  if [[ $http_code == 200 ]]; then
-    rm -f "$body"
-    return 0
-  fi
-  cat "$body" >>"$LOG_PATH" || true
-  if grep -q "missing_permissions" "$body"; then
-    KEY_REJECTION="The key works but lacks Agents Platform / Conversational AI access. Edit the key's permissions in the ElevenLabs dashboard (or create an unrestricted key) and paste it again."
-  else
-    KEY_REJECTION="ElevenLabs rejected the key (HTTP $http_code). Check it for truncation and paste it again."
-  fi
-  rm -f "$body"
-  return 1
+  local status=0
+  KEY_REJECTION=$(printf '%s' "$1" | setupfiles check-key) || status=$?
+  return "$status"
+}
+
+store_api_key() {
+  printf '%s' "$1" | setupfiles store-key
 }
 
 print_key_instructions() {
@@ -258,17 +269,6 @@ print_key_instructions() {
   echo "The key is stored only in $KEY_PATH"
   echo "(readable by you alone) and is sent only to api.elevenlabs.io."
   rule
-}
-
-store_api_key() {
-  # Write a fresh private file and rename it into place so a pre-planted
-  # symlink or FIFO at the key path can never receive the secret.
-  local tmp
-  install -d -m 700 "$CONFIG_DIR"
-  tmp=$(umask 077 && mktemp "$CONFIG_DIR/.api_key.XXXXXXXX")
-  printf '%s\n' "$1" >"$tmp"
-  chmod 600 "$tmp"
-  mv -f "$tmp" "$KEY_PATH"
 }
 
 if [[ -s $KEY_PATH ]]; then
@@ -301,7 +301,7 @@ else
       printf '%s Key accepted — Agents Platform access confirmed.\n' "$OK"
       break
     elif [[ $key_status == 2 ]]; then
-      printf '%s Could not reach api.elevenlabs.io to validate the key (details in %s).\n' "$WARN" "$LOG_PATH"
+      printf '%s %s\n' "$WARN" "$KEY_REJECTION"
       if confirm "Store it unvalidated and continue?" y; then break; fi
     else
       printf '%s %s\n' "$BAD" "$KEY_REJECTION"
@@ -311,50 +311,20 @@ else
   unset api_key
 fi
 
-missing_bindings=()
-needs_dictation_rebind=false
-has_retired_bindings=false
-if [[ -f $BINDINGS_PATH ]]; then
-  grep -Fq 'omarchy-shell omarvis toggle")' "$BINDINGS_PATH" || missing_bindings+=("$AGENT_BINDING")
-  # Ask mode and the typed one-shot no longer exist. Any binding left over
-  # from an older install would now dead-end, so setup deletes it.
-  if grep -Eq 'omarvis (toggle|toggleMode) ask"|/bin/omarvis-text"' "$BINDINGS_PATH"; then
-    has_retired_bindings=true
-  fi
-  # The dictation keys are one unit: the press/release pair plus the submap
-  # that makes the Space chord possible. Any install without the submap (or
-  # with the pre-submap pair) gets the whole unit rewritten.
-  if ! grep -Fq 'hl.dsp.submap("omarvis-dictate")' "$BINDINGS_PATH"; then
-    needs_dictation_rebind=true
-    missing_bindings+=("$DICTATE_UNBIND" "$DICTATE_START_BINDING" "$DICTATE_SUBMAP_ENTER" "$DICTATE_STOP_BINDING" "$DICTATE_SUBMAP_LEAVE" "$DICTATE_SUBMAP" "$HANDSFREE_SUBMAP")
-  else
-    grep -Fq 'hl.define_submap("omarvis-handsfree"' "$BINDINGS_PATH" || missing_bindings+=("$HANDSFREE_SUBMAP")
-    grep -Fq 'omarchy-shell omarvis dictate start")' "$BINDINGS_PATH" || missing_bindings+=("$DICTATE_START_BINDING")
-    grep -Fq 'omarchy-shell omarvis dictate stop", { release = true, submap_universal = true })' "$BINDINGS_PATH" || missing_bindings+=("$DICTATE_STOP_BINDING")
-    grep -Fq 'hl.dsp.submap("reset"), { release = true, submap_universal = true })' "$BINDINGS_PATH" || missing_bindings+=("$DICTATE_SUBMAP_LEAVE")
-    grep -Fq 'hl.define_submap("omarvis-dictate"' "$BINDINGS_PATH" || missing_bindings+=("$DICTATE_SUBMAP")
-  fi
-  grep -Fq 'omarchy-shell omarvis panel")' "$BINDINGS_PATH" || missing_bindings+=("$PANEL_BINDING")
-  grep -Fq 'omarchy-shell omarvis toggleRemote")' "$BINDINGS_PATH" || missing_bindings+=("$REMOTE_BINDING")
-fi
+# The bindings plan comes from the helper, which reads the file through a
+# validated descriptor; the same helper later applies it transactionally.
+BINDINGS_PLAN=$(setupfiles bindings plan)
+BINDINGS_EXIST=$(jq -r '.exists' <<<"$BINDINGS_PLAN")
+BINDINGS_CHANGES=$(jq -r '.changes' <<<"$BINDINGS_PLAN")
 APPLY_BINDINGS=false
-if (( ${#missing_bindings[@]} > 0 )) || [[ $has_retired_bindings == true ]]; then
+if [[ $BINDINGS_CHANGES == true ]]; then
   echo
   echo "Hotkey bindings:"
-  echo "$AGENT_BINDING"
-  echo "$DICTATE_UNBIND  -- replaces Omarchy's Toggle window split binding"
-  echo "$DICTATE_START_BINDING"
-  echo "$DICTATE_SUBMAP_ENTER"
-  echo "$DICTATE_STOP_BINDING"
-  echo "$DICTATE_SUBMAP_LEAVE"
-  echo "$DICTATE_SUBMAP"
-  echo "$HANDSFREE_SUBMAP"
-  echo "$PANEL_BINDING"
-  echo "$REMOTE_BINDING"
+  setupfiles bindings show | sed 's|^hl.unbind("SUPER + J")$|&  -- replaces Omarchy'"'"'s Toggle window split binding|'
   if confirm "Update the missing or outdated bindings in $BINDINGS_PATH? (timestamped backup first)" n; then
     APPLY_BINDINGS=true
   fi
-elif [[ -f $BINDINGS_PATH ]]; then
+elif [[ $BINDINGS_EXIST == true ]]; then
   printf '%s Keybindings already configured in %s.\n' "$OK" "$BINDINGS_PATH"
 fi
 
@@ -365,35 +335,20 @@ run_logged "omarchy pkg add portaudio python-pyaudio" omarchy pkg add portaudio 
 if [[ $INSTALL_WTYPE == true ]]; then
   run_logged "omarchy pkg add wtype" omarchy pkg add wtype
 fi
-if [[ $WILL_INSTALL_AGENT_BROWSER == true ]]; then
-  install -d "$AGENT_BROWSER_DIR"
-  install -m 644 "$PLUGIN_DIR/npm/package.json" "$AGENT_BROWSER_DIR/package.json"
-  install -m 644 "$PLUGIN_DIR/npm/package-lock.json" "$AGENT_BROWSER_DIR/package-lock.json"
-  run_logged "npm ci agent-browser (integrity-checked from the committed lockfile)" \
-    npm ci --prefix "$AGENT_BROWSER_DIR" --omit=dev --no-audit --no-fund
+if [[ $INSTALL_CHROMIUM == true ]]; then
+  run_logged "omarchy pkg add chromium" omarchy pkg add chromium
+  BROWSER_EXECUTABLE=$(command -v chromium || true)
 fi
-if [[ $NEEDS_MANAGED_BROWSER == true && -x $AGENT_BROWSER_PATH ]]; then
-  run_logged "agent-browser install (managed browser)" "$AGENT_BROWSER_PATH" install
+# Earlier releases provisioned agent-browser with npm into this directory;
+# that layout (and its node runtime dependency) is retired.
+if [[ -f $AGENT_BROWSER_DIR/package-lock.json && -d $AGENT_BROWSER_DIR/node_modules ]]; then
+  run_logged "remove the retired npm-provisioned agent-browser layout" \
+    rm -rf -- "$AGENT_BROWSER_DIR/node_modules" "$AGENT_BROWSER_DIR/package.json" "$AGENT_BROWSER_DIR/package-lock.json"
 fi
-if [[ -f "$VENDOR_DIR/$ELEVENLABS_CLIENT_FILE" ]] \
-  && printf '%s  %s\n' "$ELEVENLABS_CLIENT_SHA256" "$VENDOR_DIR/$ELEVENLABS_CLIENT_FILE" \
-    | sha256sum -c - >>"$LOG_PATH" 2>&1; then
-  note "· browser SDK already present: $ELEVENLABS_CLIENT_FILE"
-else
-  sdk_tmp=$(mktemp -d)
-  run_logged "download @elevenlabs/client $ELEVENLABS_CLIENT_VERSION" \
-    curl -fsSL --max-time 120 -o "$sdk_tmp/client.tgz" "$ELEVENLABS_CLIENT_URL"
-  run_logged "extract dist/lib.iife.js" \
-    tar -xzf "$sdk_tmp/client.tgz" -C "$sdk_tmp" package/dist/lib.iife.js
-  if ! printf '%s  %s\n' "$ELEVENLABS_CLIENT_SHA256" "$sdk_tmp/package/dist/lib.iife.js" \
-      | sha256sum -c - >>"$LOG_PATH" 2>&1; then
-    rm -rf "$sdk_tmp"
-    die "@elevenlabs/client bundle failed its pinned sha256 check; nothing was installed"
-  fi
-  install -D -m 644 "$sdk_tmp/package/dist/lib.iife.js" "$VENDOR_DIR/$ELEVENLABS_CLIENT_FILE"
-  rm -rf "$sdk_tmp"
-  note "· verified browser SDK sha256, installed $ELEVENLABS_CLIENT_FILE"
-fi
+run_logged "agent-browser 0.34.0 (pinned tarball, sha256-verified native binary)" \
+  setupfiles fetch-agent-browser
+run_logged "@elevenlabs/client 1.23.0 browser bundle (pinned tarball, sha256-verified)" \
+  setupfiles fetch-elevenlabs-client
 
 phase 2 "Creating the Python environment"
 run_logged "python -m venv $VENV_DIR" python -m venv --system-site-packages "$VENV_DIR"
@@ -401,48 +356,12 @@ run_logged "pip install --require-hashes -r requirements.lock" \
   "$VENV_DIR/bin/pip" install -q --require-hashes --ignore-installed -r "$PLUGIN_DIR/requirements.lock"
 
 phase 3 "Writing configuration"
-install -d -m 700 "$CONFIG_DIR"
-existing='{}'
-if [[ -f $CONFIG_PATH ]]; then
-  existing=$(cat "$CONFIG_PATH")
-fi
-updated=$(jq \
-  --arg browser_mode "$BROWSER_MODE" \
-  --arg agent_browser_path "$AGENT_BROWSER_PATH" \
-  --arg browser_executable_path "$BROWSER_EXECUTABLE" \
-  '(del(.vision) | del(.ask_agent_id)) + {
-    agent_id: (.agent_id // ""),
-    llm: (.llm // "gpt-5.6-sol"),
-    voice_id: (.voice_id // "JSWO6cw2AyFE324d5kEr"),
-    input_device_index: (.input_device_index // null),
-    herdr_announcements: (.herdr_announcements // true),
-    web_port: (.web_port // 4763),
-    browser_mode: $browser_mode,
-    agent_browser_path: $agent_browser_path,
-    profile_path: (.profile_path // "~/.config/omarchy/omarvis/profile.md"),
-    screenshot_cache_max_age_seconds: (.screenshot_cache_max_age_seconds // 86400),
-    browser_executable_path: $browser_executable_path,
-    dictation: (((.dictation // {}) | del(.chunk_size)) + {
-      language: (.dictation.language // ""),
-      cleanup: (.dictation.cleanup // true),
-      model_id: (.dictation.model_id // "scribe_v2")
-    }),
-    ui: (((.ui // {}) | del(.earcons)) + {
-      hud_position: (.ui.hud_position // "top-center")
-    })
-  }' <<<"$existing")
-install -m 600 /dev/null "$CONFIG_PATH"
-printf '%s\n' "$updated" >"$CONFIG_PATH"
-note "· merged $CONFIG_PATH"
-
-if [[ ! -e $PROFILE_PATH ]]; then
-  install -m 600 /dev/null "$PROFILE_PATH"
-  printf '%s\n' \
-    '# Omarvis profile' \
-    '' \
-    '- Preferred name: ' \
-    '- Work and projects: ' \
-    '- Omarchy preferences: ' >"$PROFILE_PATH"
+run_logged "merge $CONFIG_PATH (previous copy kept for rollback)" \
+  setupfiles merge-config \
+    --browser-mode "$BROWSER_MODE" \
+    --agent-browser-path "$AGENT_BROWSER_PATH" \
+    --browser-executable-path "$BROWSER_EXECUTABLE"
+if [[ $(setupfiles seed-profile) == seeded ]]; then
   note "· seeded $PROFILE_PATH"
 fi
 
@@ -451,24 +370,13 @@ phase 4 "Provisioning the ElevenLabs agent"
 
 phase 5 "Keybindings"
 if [[ $APPLY_BINDINGS == true ]]; then
-  backup="$BINDINGS_PATH.$(date +%Y%m%d-%H%M%S).bak"
-  cp "$BINDINGS_PATH" "$backup"
-  if [[ $needs_dictation_rebind == true ]]; then
-    sed -i \
-      -e '\|^hl.unbind("SUPER + J")|d' \
-      -e '\|omarchy-shell omarvis dictate start")|d' \
-      -e '\|omarchy-shell omarvis dictate stop", { release = true })|d' \
-      "$BINDINGS_PATH"
+  backup=$(setupfiles bindings apply)
+  if [[ -n $backup ]]; then
+    note "· updated bindings, validated the reload (backup: $BINDINGS_PATH → $backup)"
+  else
+    note "· nothing to change"
   fi
-  if [[ $has_retired_bindings == true ]]; then
-    sed -i -E '/omarvis (toggle|toggleMode) ask"|\/bin\/omarvis-text"/d' "$BINDINGS_PATH"
-  fi
-  if (( ${#missing_bindings[@]} > 0 )); then
-    printf '\n' >>"$BINDINGS_PATH"
-    printf '%s\n' "${missing_bindings[@]}" >>"$BINDINGS_PATH"
-  fi
-  note "· updated bindings (backup: $backup)"
-elif (( ${#missing_bindings[@]} > 0 )) || [[ $has_retired_bindings == true ]]; then
+elif [[ $BINDINGS_CHANGES == true ]]; then
   note "· skipped at your request — run omarvis-setup again to be asked again"
 else
   note "· nothing to change"
@@ -476,15 +384,26 @@ fi
 
 phase 6 "Registering the plugin"
 run_logged "omarchy-shell shell rescanPlugins" omarchy-shell shell rescanPlugins
-run_logged "omarchy plugin enable io.github.eliasstravik.omarvis" omarchy plugin enable io.github.eliasstravik.omarvis
+PLUGIN_WAS_ENABLED=false
+if omarchy-shell shell listPlugins 2>/dev/null \
+  | jq -e --arg id "$PLUGIN_ID" '.[] | select(.id == $id and .enabled == true)' >/dev/null 2>&1; then
+  PLUGIN_WAS_ENABLED=true
+fi
+setupfiles journal add "{\"action\": \"plugin\", \"was_enabled\": $PLUGIN_WAS_ENABLED}"
+run_logged "omarchy plugin enable $PLUGIN_ID" omarchy plugin enable "$PLUGIN_ID"
 PLUGIN_LOADED=false
-if omarchy-shell shell listPlugins 2>>"$LOG_PATH" | jq -e '.[] | select(.id == "io.github.eliasstravik.omarvis")' >>"$LOG_PATH" 2>&1; then
+if omarchy-shell shell listPlugins 2>/dev/null | jq -e --arg id "$PLUGIN_ID" '.[] | select(.id == $id)' >/dev/null 2>&1; then
   PLUGIN_LOADED=true
 fi
 SERVICE_OK=false
-if omarchy-shell omarvis status >>"$LOG_PATH" 2>&1; then
+if omarchy-shell omarvis status 2>&1 | setupfiles log; then
   SERVICE_OK=true
 fi
+
+# Everything applied: the journal's backups stay as history, the journal
+# itself is retired so the next run does not "recover" a good install.
+setupfiles journal clear
+SETUP_DONE=true
 
 # ------------------------------------------------------------------ Receipt
 
@@ -500,7 +419,7 @@ case $BROWSER_MODE in
   omarvis-browser)
     printf '  %s Browser control: own profile under ~/.local/share/omarvis/browser-profile\n' "$OK" ;;
   *)
-    printf '  %s Browser control: disabled (install npm and re-run omarvis-setup to enable it)\n' "$WARN" ;;
+    printf '  %s Browser control: disabled (install chromium and re-run omarvis-setup to enable it)\n' "$WARN" ;;
 esac
 printf '  %s API key: %s (readable by you alone)\n' "$OK" "$KEY_PATH"
 if [[ $PLUGIN_LOADED == true && $SERVICE_OK == true ]]; then

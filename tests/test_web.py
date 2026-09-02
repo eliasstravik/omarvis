@@ -30,6 +30,8 @@ from omarvis.web import (
     remove_mount,
     run_command,
     stable_secret,
+    BoundedHTTPServer,
+    BrokerFull,
 )
 from omarvis.privatefiles import PrivateFileError
 
@@ -178,7 +180,7 @@ def test_bind_failure_has_a_distinct_process_exit_code(monkeypatch, capsys) -> N
     def fail_bind(*_args, **_kwargs):
         raise OSError("address already in use")
 
-    monkeypatch.setattr("omarvis.web.ThreadingHTTPServer", fail_bind)
+    monkeypatch.setattr("omarvis.web.BoundedHTTPServer", fail_bind)
 
     assert main(["--port", "4763"]) == BIND_FAILURE_EXIT
     assert unmounts == [True]
@@ -686,23 +688,28 @@ def test_phone_page_ships_its_own_nerd_font_and_shares_the_hud_vocabulary() -> N
 
 def test_setup_pins_the_browser_sdk_download() -> None:
     # The SDK bundle is downloaded by omarvis-setup rather than vendored, so
-    # the pin lives in the script: exact version, registry source, and the
-    # sha256 of dist/lib.iife.js from @elevenlabs/client 1.23.0.
-    script = (Path(__file__).parents[1] / "bin" / "omarvis-setup").read_text(encoding="utf-8")
+    # the pin lives in the setup helper: exact version, registry source, the
+    # sha256 of the tarball, and the sha256 of dist/lib.iife.js from
+    # @elevenlabs/client 1.23.0.
+    from omarvis.setupfiles import ELEVENLABS_CLIENT, ELEVENLABS_CLIENT_VERSION
+    from omarvis.web import VENDOR_ASSET, VENDOR_ROUTE
 
-    assert 'ELEVENLABS_CLIENT_VERSION="1.23.0"' in script
-    assert 'ELEVENLABS_CLIENT_URL="https://registry.npmjs.org/@elevenlabs/client/-/' in script
-    assert (
-        'ELEVENLABS_CLIENT_SHA256='
-        '"b6adb12bd5df649af3ce3ac9205fd0e7d1c099513481c58bd1990f2d50903204"'
-    ) in script
-    # The downloaded filename, the served route, and the page's script tag
+    assert ELEVENLABS_CLIENT_VERSION == "1.23.0"
+    assert ELEVENLABS_CLIENT.url == (
+        "https://registry.npmjs.org/@elevenlabs/client/-/client-1.23.0.tgz"
+    )
+    assert ELEVENLABS_CLIENT.member == "package/dist/lib.iife.js"
+    assert ELEVENLABS_CLIENT.member_sha256 == (
+        "b6adb12bd5df649af3ce3ac9205fd0e7d1c099513481c58bd1990f2d50903204"
+    )
+    assert ELEVENLABS_CLIENT.tarball_sha256 == (
+        "4c7be4be814674f625d7aa71c79ea4c36913a81413b353498e136953f06f570c"
+    )
+    # The installed filename, the served route, and the page's script tag
     # must all agree or the phone page loads nothing.
-    from omarvis.web import VENDOR_ROUTE
-
     filename = VENDOR_ROUTE.rsplit("/", 1)[-1]
-    assert 'ELEVENLABS_CLIENT_FILE="elevenlabs-client-$ELEVENLABS_CLIENT_VERSION.iife.js"' in script
     assert filename == "elevenlabs-client-1.23.0.iife.js"
+    assert ELEVENLABS_CLIENT.destination == VENDOR_ASSET
     page = (Path(__file__).parents[1] / "assets" / "web" / "index.html").read_text(encoding="utf-8")
     assert f'src="./vendor/{filename}?k=OMARVIS_PAIRING_KEY"' in page
 
@@ -718,3 +725,168 @@ def test_phone_infers_thinking_from_the_final_user_transcript() -> None:
     assert "setPondering(false);" in page
     assert "(runInFlight || pondering) && live" in page
     assert "}, 12000);" in page
+
+
+# ----------------------------------------------- Connection cardinality
+
+
+def _bounded_server(monkeypatch, tmp_path: Path, *, max_connections: int, timeout: float = 1.0):
+    app, _events = _simulate_app(monkeypatch)
+    monkeypatch.setattr("omarvis.web.REQUEST_TIMEOUT_SECONDS", timeout)
+    index = tmp_path / "index.html"
+    index.write_text("<style>/* OMARVIS_THEME */</style>ready", encoding="utf-8")
+    vendor = tmp_path / "client.js"
+    vendor.write_text("window.ElevenLabsClient = {};", encoding="utf-8")
+    assets = ThemeAssets(tmp_path / "theme", index, vendor)
+    server = BoundedHTTPServer(("127.0.0.1", 0), make_handler(app, assets), max_connections=max_connections)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return app, server, thread
+
+
+def _wait(predicate, seconds: float = 5.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
+
+
+def test_connection_cap_rejects_excess_clients_before_any_header_is_read(monkeypatch, tmp_path: Path) -> None:
+    import socket
+
+    app, server, thread = _bounded_server(monkeypatch, tmp_path, max_connections=2, timeout=1.0)
+    port = server.server_address[1]
+    stalled = []
+    try:
+        # Two clients connect and send nothing: they hold both slots.
+        for _ in range(2):
+            stalled.append(socket.create_connection(("127.0.0.1", port)))
+        assert _wait(lambda: server.active_connections() == 2)
+
+        # The third gets a bare 503 and is closed without a thread or parse.
+        third = socket.create_connection(("127.0.0.1", port))
+        third.settimeout(3.0)
+        answer = third.recv(200)
+        assert answer.startswith(b"HTTP/1.1 503")
+        assert third.recv(10) == b""
+        third.close()
+        assert server.rejected == 1
+
+        # The stalled clients hit the read deadline and free their slots.
+        assert _wait(lambda: server.active_connections() == 0, seconds=5.0)
+        for connection in stalled:
+            connection.settimeout(2.0)
+            assert connection.recv(10) == b""
+
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection.request("GET", "/?k=wrong")
+        assert connection.getresponse().status == 403
+        connection.close()
+    finally:
+        for connection in stalled:
+            connection.close()
+        app.stop()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_event_stream_slots_are_capped_independently_of_queues() -> None:
+    broker = EventBroker(backlog=2, max_subscribers=1)
+    first = broker.subscribe()
+    with pytest.raises(BrokerFull):
+        broker.subscribe()
+    assert broker.refused == 1
+    assert broker.subscriber_count() == 1
+    broker.unsubscribe(first)
+    broker.subscribe()
+    assert broker.subscriber_count() == 1
+
+
+def test_event_stream_request_gets_503_when_no_slot_is_free(monkeypatch, tmp_path: Path) -> None:
+    app, server, thread = _bounded_server(monkeypatch, tmp_path, max_connections=4, timeout=3.0)
+    app.broker = EventBroker(max_subscribers=0)
+    port = server.server_address[1]
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection.request("GET", "/api/events?k=pairing-secret")
+        response = connection.getresponse()
+        assert response.status == 503
+        assert json.loads(response.read())["error"] == "event stream busy"
+        connection.close()
+        # The refused stream also released the session it had attached to.
+        assert app.session() is None
+    finally:
+        app.stop()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_server_close_shuts_every_open_connection_deterministically(monkeypatch, tmp_path: Path) -> None:
+    import socket
+
+    app, server, thread = _bounded_server(monkeypatch, tmp_path, max_connections=4, timeout=30.0)
+    port = server.server_address[1]
+    held = [socket.create_connection(("127.0.0.1", port)) for _ in range(3)]
+    try:
+        assert _wait(lambda: server.active_connections() == 3)
+        app.stop()
+        server.shutdown()
+        started = time.monotonic()
+        server.server_close()
+        for connection in held:
+            connection.settimeout(3.0)
+            assert connection.recv(10) == b""
+        assert time.monotonic() - started < 3.0
+        assert _wait(lambda: server.active_connections() == 0)
+    finally:
+        for connection in held:
+            connection.close()
+        thread.join(timeout=2)
+
+
+def test_request_log_never_contains_the_pairing_key(monkeypatch, tmp_path: Path, capsys) -> None:
+    app, server, thread = _bounded_server(monkeypatch, tmp_path, max_connections=4, timeout=3.0)
+    port = server.server_address[1]
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection.request("GET", "/omarvis/?k=pairing-secret")
+        assert connection.getresponse().status == 200
+        connection.close()
+    finally:
+        app.stop()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    logged = capsys.readouterr().err
+    assert '"GET /omarvis/" 200' in logged
+    assert "pairing-secret" not in logged
+
+
+def test_served_assets_are_read_once_through_descriptors_and_bounded(tmp_path: Path) -> None:
+    index = tmp_path / "index.html"
+    index.write_text("<style>/* OMARVIS_THEME */</style>ready", encoding="utf-8")
+    victim = tmp_path / "victim.js"
+    victim.write_text("leak", encoding="utf-8")
+    vendor = tmp_path / "vendor" / "client.js"
+    vendor.parent.mkdir()
+    vendor.symlink_to(victim)
+    fonts = tmp_path / "fonts"
+    fonts.mkdir()
+    font = fonts / "jetbrains-mono-nf-regular.woff2"
+    font.write_bytes(b"wOF2" + b"\0" * 10)
+    assets = ThemeAssets(tmp_path / "theme", index, vendor, fonts)
+
+    # A planted symlink at the vendor path is refused, not followed.
+    assert assets.vendor() is None
+    served = assets.font("jetbrains-mono-nf-regular.woff2")
+    assert served is not None
+    body, etag, _modified, content_type = served
+    assert body.startswith(b"wOF2") and content_type == "font/woff2" and etag.startswith('"')
+    # Later changes on disk are irrelevant: the bytes were taken once.
+    font.write_bytes(b"changed")
+    assert assets.font("jetbrains-mono-nf-regular.woff2")[0].startswith(b"wOF2")
+    assert assets.font("../web-secret") is None

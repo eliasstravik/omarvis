@@ -8,7 +8,7 @@ import os
 import queue
 import secrets
 import signal
-import stat as stat_module
+import socket
 import sys
 import threading
 import time
@@ -24,7 +24,14 @@ from urllib.parse import parse_qs, urlsplit
 
 from .catalog import HYPR_DISPATCHERS, catalog_variables, desktop_state, load_catalog
 from .daemon import ExecutionResult, RunToolHandler, load_api_key, load_config
-from .privatefiles import MAX_SECRET_BYTES, private_dir, read_private_file, write_private_file
+from .privatefiles import (
+    MAX_SECRET_BYTES,
+    PrivateFileError,
+    private_dir,
+    read_private_file,
+    read_private_path,
+    write_private_file,
+)
 from .process import execute_process
 from .screenshot import capture_and_upload_screenshot
 
@@ -54,6 +61,18 @@ FONT_FILES = (
     "jetbrains-mono-nf-regular.woff2",
     "jetbrains-mono-nf-bold.woff2",
 )
+# Every served asset is read once through a validated descriptor and kept in
+# memory, so a request never touches the filesystem and the total held is
+# bounded by these caps.
+ASSET_LIMIT = 2 * 1024 * 1024
+# Connection bounds. tailscale serve proxies one TCP connection per client
+# request, so the caps are small and independent of authentication: a
+# tailnet client that stalls or floods runs out of slots, not the daemon out
+# of threads.
+MAX_CONNECTIONS = 16
+MAX_EVENT_STREAMS = 2
+REQUEST_TIMEOUT_SECONDS = 15.0
+EVENT_STREAM_LIMIT_SECONDS = SESSION_LIMIT_SECONDS + 30.0
 
 
 def emit_json(payload: Mapping[str, Any]) -> None:
@@ -222,25 +241,42 @@ class TailnetController:
 SUBSCRIBER_BACKLOG = 64
 
 
+class BrokerFull(RuntimeError):
+    """Every event-stream slot is taken."""
+
+
 class EventBroker:
     """Fan events out to SSE subscribers with a bounded backlog per client.
 
     A slow or stalled phone must not retain events forever, so each subscriber
     holds at most ``SUBSCRIBER_BACKLOG`` events and the oldest is dropped when
     a new one arrives; the newest events (including "ended") always survive.
+    The number of subscribers is capped as well, so queues cannot be
+    multiplied by opening streams.
     """
 
-    def __init__(self, backlog: int = SUBSCRIBER_BACKLOG) -> None:
+    def __init__(
+        self, backlog: int = SUBSCRIBER_BACKLOG, max_subscribers: int = MAX_EVENT_STREAMS
+    ) -> None:
         self._lock = threading.Lock()
         self._subscribers: set[queue.Queue[dict[str, Any]]] = set()
         self.backlog = backlog
+        self.max_subscribers = max_subscribers
         self.dropped = 0
+        self.refused = 0
 
     def subscribe(self) -> queue.Queue[dict[str, Any]]:
         stream: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=self.backlog)
         with self._lock:
+            if len(self._subscribers) >= self.max_subscribers:
+                self.refused += 1
+                raise BrokerFull("no event stream slot available")
             self._subscribers.add(stream)
         return stream
+
+    def subscriber_count(self) -> int:
+        with self._lock:
+            return len(self._subscribers)
 
     def unsubscribe(self, stream: queue.Queue[dict[str, Any]]) -> None:
         with self._lock:
@@ -501,6 +537,10 @@ class RemoteApplication:
         self.command_sink({"event": "phone", "active": False, "reason": reason})
         return True
 
+    @property
+    def stopping(self) -> bool:
+        return self._stopping.is_set()
+
     def stop(self) -> None:
         self._stopping.set()
         self.end_session("server-stopped")
@@ -529,23 +569,46 @@ class ThemeAssets:
         self.font_dir = font_dir
         self._signature: tuple[int, ...] | None = None
         self._html = b""
+        self._lock = threading.Lock()
+        self._static: dict[str, tuple[bytes, str, str, str] | None] = {}
 
     @staticmethod
     def _load_toml(path: Path) -> dict[str, Any]:
-        # The theme directory is a symlink by design, so this is a bounded
-        # regular-file read rather than a no-follow one.
+        # The theme directory is a symlink by design (Omarchy points it at
+        # the active theme), so the directory itself is resolved normally and
+        # the file inside it is read through a validated descriptor.
         try:
-            with path.open("rb") as handle:
-                info = os.fstat(handle.fileno())
-                if not stat_module.S_ISREG(info.st_mode) or info.st_size > THEME_FILE_LIMIT:
-                    return {}
-                raw = handle.read(THEME_FILE_LIMIT + 1)
-            if len(raw) > THEME_FILE_LIMIT:
+            raw = read_private_path(path.resolve(), limit=THEME_FILE_LIMIT, private=False)
+            if raw is None:
                 return {}
             loaded = tomllib.loads(raw.decode("utf-8"))
-        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        except (OSError, PrivateFileError, tomllib.TOMLDecodeError, UnicodeDecodeError):
             return {}
         return loaded if isinstance(loaded, dict) else {}
+
+    def _static_asset(
+        self, key: str, path: Path, content_type: str
+    ) -> tuple[bytes, str, str, str] | None:
+        """Read a shipped asset once, bounded and through its directory descriptor."""
+        with self._lock:
+            if key in self._static:
+                return self._static[key]
+            try:
+                body = read_private_path(path, limit=ASSET_LIMIT, private=False)
+            except (OSError, PrivateFileError):
+                body = None
+            if body is None:
+                asset = None
+            else:
+                digest = hashlib.sha256(body).hexdigest()[:32]
+                asset = (
+                    body,
+                    f'"{digest}"',
+                    formatdate(time.time(), usegmt=True),
+                    content_type,
+                )
+            self._static[key] = asset
+            return asset
 
     @staticmethod
     def _color(shell: Mapping[str, Any], colors: Mapping[str, Any], value: Any, fallback: str) -> str:
@@ -609,30 +672,22 @@ class ThemeAssets:
                 shell, colors, (popups.get("border"), "accent"), "#334155"
             ),
         }
-        template = self.index_path.read_text(encoding="utf-8")
+        raw = read_private_path(self.index_path, limit=ASSET_LIMIT, private=False)
+        template = (raw or b"").decode("utf-8", "replace")
         css = ":root{" + "".join(f"--omarvis-{key}:{value};" for key, value in values.items()) + "}"
         self._html = template.replace("/* OMARVIS_THEME */", css).encode("utf-8")
         self._signature = signature
         return self._html
 
-    def font(self, name: str) -> tuple[Path, str, str, str] | None:
+    def font(self, name: str) -> tuple[bytes, str, str, str] | None:
         if name not in FONT_FILES:
             return None
-        path = self.font_dir / name
-        if not path.exists():
-            return None
-        stat = path.stat()
-        etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
-        modified = formatdate(stat.st_mtime, usegmt=True)
-        return path, etag, modified, "font/woff2"
+        return self._static_asset(f"font:{name}", self.font_dir / name, "font/woff2")
 
-    def vendor(self) -> tuple[Path, str, str, str] | None:
-        if not self.vendor_path.exists():
-            return None
-        stat = self.vendor_path.stat()
-        etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
-        modified = formatdate(stat.st_mtime, usegmt=True)
-        return self.vendor_path, etag, modified, "text/javascript; charset=utf-8"
+    def vendor(self) -> tuple[bytes, str, str, str] | None:
+        return self._static_asset(
+            "vendor", self.vendor_path, "text/javascript; charset=utf-8"
+        )
 
 
 def _route_path(raw_path: str) -> tuple[str, dict[str, list[str]]]:
@@ -649,9 +704,21 @@ def make_handler(app: RemoteApplication, assets: ThemeAssets) -> type[BaseHTTPRe
     class RemoteHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "Omarvis"
+        # Socket deadline for reading the request line, headers, and body,
+        # and for every write, so a stalled client cannot pin a thread.
+        timeout = REQUEST_TIMEOUT_SECONDS
 
         def log_message(self, format: str, *args: Any) -> None:
             print(f"omarvis web: {format % args}", file=sys.stderr, flush=True)
+
+        def log_request(self, code: Any = "-", size: Any = "-") -> None:
+            # The pairing key rides in the query string of the first page
+            # load; log the path only so the credential never reaches stderr.
+            try:
+                path = urlsplit(self.path).path
+            except (AttributeError, ValueError):
+                path = "-"
+            self.log_message('"%s %s" %s', getattr(self, "command", "-"), path, code)
 
         def _json(self, status: int, payload: Mapping[str, Any]) -> None:
             body = json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":")).encode()
@@ -700,14 +767,14 @@ def make_handler(app: RemoteApplication, assets: ThemeAssets) -> type[BaseHTTPRe
 
         def _file(
             self,
-            asset: tuple[Path, str, str, str] | None,
+            asset: tuple[bytes, str, str, str] | None,
             *,
             cache_control: str,
         ) -> None:
             if asset is None:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "asset unavailable"})
                 return
-            file_path, etag, modified, content_type = asset
+            body, etag, modified, content_type = asset
             if self.headers.get("If-None-Match") == etag:
                 self.send_response(HTTPStatus.NOT_MODIFIED)
                 self.send_header("ETag", etag)
@@ -715,7 +782,6 @@ def make_handler(app: RemoteApplication, assets: ThemeAssets) -> type[BaseHTTPRe
                 self.end_headers()
                 self.close_connection = True
                 return
-            body = file_path.read_bytes()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
@@ -840,7 +906,13 @@ def make_handler(app: RemoteApplication, assets: ThemeAssets) -> type[BaseHTTPRe
             if session is None:
                 self._json(HTTPStatus.CONFLICT, {"error": "no live remote session"})
                 return
-            stream = app.broker.subscribe()
+            try:
+                stream = app.broker.subscribe()
+            except BrokerFull:
+                app.stream_closed(session)
+                self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "event stream busy"})
+                return
+            stream_deadline = time.monotonic() + EVENT_STREAM_LIMIT_SECONDS
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-store")
@@ -859,7 +931,11 @@ def make_handler(app: RemoteApplication, assets: ThemeAssets) -> type[BaseHTTPRe
                         self.wfile.flush()
                     app.end_session("simulation-complete")
                     return
-                while app.session() is session:
+                while (
+                    app.session() is session
+                    and not app.stopping
+                    and time.monotonic() < stream_deadline
+                ):
                     try:
                         event = stream.get(timeout=3.0)
                         data = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
@@ -917,6 +993,86 @@ def make_handler(app: RemoteApplication, assets: ThemeAssets) -> type[BaseHTTPRe
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     return RemoteHandler
+
+
+class BoundedHTTPServer(ThreadingHTTPServer):
+    """One thread per connection, but never more than ``max_connections``.
+
+    Excess connections are answered with a bare 503 and closed before any
+    header is parsed, so the cap holds before authentication. Every accepted
+    socket is tracked, and ``server_close`` shuts them all down so streaming
+    handlers end deterministically on shutdown instead of lingering.
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 8
+
+    def __init__(
+        self,
+        address: tuple[str, int],
+        handler: type[BaseHTTPRequestHandler],
+        *,
+        max_connections: int = MAX_CONNECTIONS,
+    ) -> None:
+        self.max_connections = max_connections
+        self._slots = threading.BoundedSemaphore(max_connections)
+        self._active_lock = threading.Lock()
+        self._active: set[socket.socket] = set()
+        self.rejected = 0
+        super().__init__(address, handler)
+
+    def active_connections(self) -> int:
+        with self._active_lock:
+            return len(self._active)
+
+    def process_request(self, request: socket.socket, client_address: Any) -> None:  # type: ignore[override]
+        if not self._slots.acquire(blocking=False):
+            self.rejected += 1
+            try:
+                request.settimeout(1.0)
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Connection: close\r\nContent-Length: 0\r\n\r\n"
+                )
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        with self._active_lock:
+            self._active.add(request)
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._release(request)
+            self.shutdown_request(request)
+            raise
+
+    def _release(self, request: socket.socket) -> None:
+        with self._active_lock:
+            if request not in self._active:
+                return
+            self._active.discard(request)
+        self._slots.release()
+
+    def process_request_thread(self, request: socket.socket, client_address: Any) -> None:  # type: ignore[override]
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._release(request)
+
+    def close_connections(self) -> None:
+        with self._active_lock:
+            sockets = tuple(self._active)
+        for connection in sockets:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def server_close(self) -> None:
+        self.close_connections()
+        super().server_close()
 
 
 def _stdin_loop(app: RemoteApplication, stop: threading.Event) -> None:
@@ -982,8 +1138,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         simulate=arguments.simulate,
     )
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app, ThemeAssets()))
-        server.daemon_threads = True
+        server = BoundedHTTPServer(("127.0.0.1", port), make_handler(app, ThemeAssets()))
     except OSError as error:
         emit_json({"event": "error", "message": f"Web bind failed: {error}"})
         return BIND_FAILURE_EXIT

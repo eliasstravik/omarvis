@@ -16,6 +16,7 @@ import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import BinaryIO
 
 MAX_SECRET_BYTES = 4096
 MAX_CONFIG_BYTES = 1024 * 1024
@@ -27,8 +28,14 @@ class PrivateFileError(RuntimeError):
 
 
 @contextmanager
-def private_dir(path: Path, *, create: bool = True, mode: int = 0o700) -> Iterator[int]:
-    """Yield a descriptor for ``path`` after proving it is our own directory."""
+def private_dir(
+    path: Path, *, create: bool = True, mode: int = 0o700, private: bool = True
+) -> Iterator[int]:
+    """Yield a descriptor for ``path`` after proving it is our own directory.
+
+    With ``private`` the directory is also made 0700; without it (shared
+    assets such as fonts) only ownership and type are enforced.
+    """
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -47,7 +54,7 @@ def private_dir(path: Path, *, create: bool = True, mode: int = 0o700) -> Iterat
             raise PrivateFileError(f"{path} is not a directory")
         if info.st_uid != os.geteuid():
             raise PrivateFileError(f"{path} is not owned by the current user")
-        if stat.S_IMODE(info.st_mode) & 0o077:
+        if private and stat.S_IMODE(info.st_mode) & 0o077:
             try:
                 os.fchmod(fd, mode)
             except OSError as error:
@@ -70,6 +77,24 @@ def _validate(fd: int, label: str, *, limit: int, private: bool) -> os.stat_resu
     if private and stat.S_IMODE(info.st_mode) & 0o077:
         os.fchmod(fd, 0o600)
     return info
+
+
+@contextmanager
+def open_private_file(
+    dir_fd: int, name: str, *, limit: int, private: bool = True
+) -> Iterator[BinaryIO]:
+    """Open ``name`` inside ``dir_fd`` for reading once it passes validation."""
+    try:
+        fd = os.open(name, os.O_RDONLY | _OPEN_FLAGS, dir_fd=dir_fd)
+    except OSError as error:
+        raise PrivateFileError(f"{name} cannot be opened safely: {error}") from error
+    try:
+        _validate(fd, name, limit=limit, private=private)
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as handle:
+        yield handle
 
 
 def read_private_file(
@@ -132,7 +157,7 @@ def write_private_file(dir_fd: int, name: str, data: bytes, *, mode: int = 0o600
 def read_private_path(path: Path, *, limit: int, private: bool = True) -> bytes | None:
     """Read ``path`` through its parent directory descriptor."""
     try:
-        with private_dir(path.parent, create=False) as dir_fd:
+        with private_dir(path.parent, create=False, private=private) as dir_fd:
             return read_private_file(dir_fd, path.name, limit=limit, private=private)
     except FileNotFoundError:
         return None

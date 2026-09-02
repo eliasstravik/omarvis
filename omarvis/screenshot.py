@@ -4,7 +4,11 @@ import os
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
+
+from .privatefiles import PrivateFileError, open_private_file, private_dir
 from .process import execute_process
+
+MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024
 
 
 def capture_screenshot(config: Mapping[str, Any]) -> Path:
@@ -12,14 +16,12 @@ def capture_screenshot(config: Mapping[str, Any]) -> Path:
         os.path.expanduser(str(config.get("cache_dir") or "~/.cache/omarvis"))
     )
     cache_dir.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["OMARCHY_SCREENSHOT_DIR"] = str(cache_dir)
     completed = execute_process(
         ["omarchy", "capture", "screenshot", "fullscreen", "save"],
         timeout=15.0,
         kill_on_timeout=True,
         stdout_limit=4000,
-        env=env,
+        extra_env={"OMARCHY_SCREENSHOT_DIR": str(cache_dir)},
     )
     if completed.timed_out:
         raise RuntimeError("Screenshot capture timed out")
@@ -50,11 +52,17 @@ def capture_and_upload_screenshot(
     screenshot: Path | None = None
     try:
         screenshot = capture(config)
-        with screenshot.open("rb") as image:
-            response = client.conversational_ai.conversations.files.create(
-                conversation_id=conversation_id,
-                file=image,
-            )
+        # The cache lives at a predictable pathname, so the file is opened
+        # through its directory descriptor without following links and
+        # validated by fstat before a byte of it is uploaded.
+        with private_dir(screenshot.parent) as dir_fd:
+            with open_private_file(
+                dir_fd, screenshot.name, limit=MAX_SCREENSHOT_BYTES, private=False
+            ) as image:
+                response = client.conversational_ai.conversations.files.create(
+                    conversation_id=conversation_id,
+                    file=image,
+                )
         file_id = str(getattr(response, "file_id", "")).strip()
         if not file_id:
             raise RuntimeError("ElevenLabs screenshot upload returned no file ID")
@@ -62,6 +70,7 @@ def capture_and_upload_screenshot(
     finally:
         if screenshot is not None:
             try:
-                screenshot.unlink(missing_ok=True)
-            except OSError:
+                with private_dir(screenshot.parent, create=False) as dir_fd:
+                    os.unlink(screenshot.name, dir_fd=dir_fd)
+            except (OSError, PrivateFileError):
                 pass
